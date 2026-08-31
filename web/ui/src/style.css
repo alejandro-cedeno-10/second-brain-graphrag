@@ -1,0 +1,118 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0f14;
+  --bg-panel: #121821;
+  --bg-panel-alt: #171f2b;
+  --borde: #263140;
+  --texto: #eef2f7;
+  --texto-tenue: #9fb0c3;
+  --acento: #4fd1c5;
+  --acento-fuerte: #22d3ee;
+  --abstencion: #f6ad55;
+  --error: #fc8181;
+  --ok: #68d391;
+  --camino-fijo: #22d3ee;
+  --camino-agentico: #c084fc;
+  --fuente: 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--texto);
+  font-family: var(--fuente);
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 0.5rem 0;
+  font-weight: 600;
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--borde);
+  border-radius: 14px;
+  padding: 1.25rem 1.5rem;
+}
+
+.etiqueta {
+  color: var(--texto-tenue);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.chip {
+  border: 1px solid var(--borde);
+  background: var(--bg-panel-alt);
+  color: var(--texto);
+  border-radius: 999px;
+  padding: 0.5rem 1.1rem;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.chip:hover:not(:disabled) {
+  border-color: var(--acento);
+  color: var(--acento);
+}
+
+.chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primario {
+  background: var(--acento-fuerte);
+  color: #06141b;
+  border: none;
+  border-radius: 10px;
+  padding: 0.7rem 1.4rem;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.primario:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+input[type='text'] {
+  background: var(--bg-panel-alt);
+  border: 1px solid var(--borde);
+  color: var(--texto);
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
+  font-size: 1.05rem;
+  width: 100%;
+}
+
+input[type='text']:focus {
+  outline: 2px solid var(--acento);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--borde);
+  border-radius: 6px;
+}

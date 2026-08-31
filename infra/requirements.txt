@@ -1,0 +1,5 @@
+aws-cdk-lib==2.267.0
+constructs>=10.0.0,<11.0.0
+
+# Para despues-del-deploy.py (lee outputs de CloudFormation).
+boto3>=1.34.0

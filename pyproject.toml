@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "second-brain"
+version = "0.1.0"
+description = "Second Brain GraphRAG — arquitectura de puertos agnóstica (demo Nexora Corp)"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "numpy>=1.26",
+    # Cliente oficial de FalkorDB (no redis-py crudo): es el mismo cliente
+    # que exige el contrib de FalkorDB del graphrag-toolkit, que fija
+    # redis>=8,<9 y no puede convivir con el redis<6 que pedía GRAPH.QUERY
+    # vía redis-py.
+    "falkordb>=1.7,<2",
+    "typer>=0.12",
+    "rich>=13.7",
+    # Loop agéntico real (ver `agent/strands_agent.py`): el `Agent` de
+    # Strands decide cuándo llamar `search_documents`/`traverse_graph`. El
+    # coverage gate se reengancha como `agent/gate_hook.py::CoverageGateHook`
+    # sobre `AfterToolsEvent.end_turn` en vez de correr antes de la única
+    # llamada del pipeline fijo (ver `agent/orchestrator.py`, que se
+    # conserva como camino determinista bajo bandera). Versión fijada:
+    # es una librería en evolución rápida y el hook depende de la forma
+    # exacta de `AfterToolsEvent` (verificado en el spike contra 1.54.0).
+    "strands-agents==1.54.0",
+]
+
+[project.optional-dependencies]
+aws = [
+    "boto3>=1.34",
+]
+web = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sse-starlette>=2.1",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "boto3>=1.34",
+    # Duplicado del extra `a2a` a propósito (mismo patrón que `boto3` de
+    # arriba, ya duplicado con el extra `aws`): los tests de
+    # `second_brain.a2a` necesitan el SDK de A2A para importar, y `dev` es
+    # el extra que `pip install -e ".[dev]"`/CI instalan.
+    "strands-agents[a2a]==1.54.0",
+]
+# Exporter OTLP para las trazas nativas de Strands (ver
+# `agent/observability.py`). NO se instala por default: el ensayo 100%
+# offline no lo necesita, y activarlo sin este extra deja un warning en
+# vez de romper el turno (`SECOND_BRAIN_OTEL_ENABLED=true` sin este extra
+# instalado).
+otel = [
+    "strands-agents[otel]==1.54.0",
+]
+# GraphRAG Toolkit de AWS Labs (`awslabs/graphrag-toolkit`), real, vía PyPI
+# (no zip de GitHub: se re-empaquetó — ver SPIKE_COMPATIBILIDAD.md §1). El
+# contrib de FalkorDB NO está en PyPI y necesita `--no-build-isolation` más
+# `hatchling`/`hatch-requirements-txt` preinstalados; por eso vive en un
+# paso de instalación aparte (ver Makefile / Dockerfile), no acá adentro.
+# Requiere Python <3.13 (fija `lru-dict==1.3.0`, sin wheels cp313).
+graphrag = [
+    "graphrag-lexical-graph==3.19.1",
+]
+# Servidor + cliente A2A (`second_brain.a2a`, ver PLAN_SERVICIOS_REALES.md
+# §6): el second brain expuesto como AGENTE para otros agentes, distinto
+# de `search_documents`/`traverse_graph` como herramientas MCP (esas NO
+# necesitan este extra — el paquete `mcp` ya llega transitivo de
+# `strands-agents` base). `a2a-sdk` es la única dependencia nueva real que
+# trae; el resto (`google-api-core`, `sqlalchemy[...]`, etc.) son
+# transitivas de `a2a-sdk[sql]` para backends de `TaskStore` que esta demo
+# no usa (el second brain corre con `InMemoryTaskStore`).
+a2a = [
+    "strands-agents[a2a]==1.54.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "docker: requiere un FalkorDB corriendo en localhost:6379 (se saltea si no hay uno disponible)",
+]

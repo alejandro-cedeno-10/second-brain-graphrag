@@ -1,0 +1,251 @@
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    volumes:
+      - falkordb-data:/data
+
+  demo:
+    build:
+      context: .
+      target: runtime
+    image: second-brain-demo:local
+    environment:
+      SECOND_BRAIN_MODE: local
+      SECOND_BRAIN_FALKOR_HOST: falkordb
+      SECOND_BRAIN_FALKOR_PORT: "6379"
+      SECOND_BRAIN_VECTOR_STORE_PATH: /app/.data/vector_store
+    volumes:
+      - ./corpus:/app/corpus:ro
+      - demo-data:/app/.data
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    # Ingesta al levantar el servicio (`docker compose up` deja el sistema
+    # listo para `docker compose run demo python demo.py query ...` sin
+    # pasos extra) y después queda vivo para que `docker compose logs demo`
+    # tenga sentido. `docker compose run --rm demo python demo.py ingest`
+    # sigue siendo la forma explícita de re-ingestar (es idempotente).
+    command: ["sh", "-c", "python demo.py ingest && tail -f /dev/null"]
+
+  test:
+    build:
+      context: .
+      target: test
+    image: second-brain-demo-test:local
+    profiles: ["test"]
+    environment:
+      SECOND_BRAIN_MODE: local
+    # `tests/test_grafo.py::test_blast_radius_contra_falkordb_real` conecta a
+    # `localhost:6379` a propósito (es el mismo host:puerto que un desarrollador
+    # usa corriendo FalkorDB suelto en Docker) — compartir el namespace de red
+    # del servicio `falkordb` es lo que hace que ese `localhost` sea real acá
+    # también, sin tocar el test para que sepa de nombres de servicio de compose.
+    network_mode: "service:falkordb"
+    volumes:
+      - ./corpus:/app/corpus:ro
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    command: ["python", "-m", "pytest", "-v"]
+
+  # UI de presentación (Vue + FastAPI/AG-UI por SSE), pensada para grabar la
+  # charla: `docker compose --profile web up -d --build web` deja el sistema
+  # completo (FalkorDB + ingesta + UI) accesible en http://localhost:8000.
+  # No corre por default (perfil separado) porque la CLI (`make demo`) sigue
+  # siendo la fuente de verdad del guion y no todos los perfiles la necesitan.
+  web:
+    build:
+      context: .
+      target: web
+    image: second-brain-demo-web:local
+    profiles: ["web"]
+    ports:
+      - "8000:8000"
+    environment:
+      SECOND_BRAIN_MODE: local
+      SECOND_BRAIN_FALKOR_HOST: falkordb
+      SECOND_BRAIN_FALKOR_PORT: "6379"
+      SECOND_BRAIN_VECTOR_STORE_PATH: /app/.data/vector_store
+    volumes:
+      - ./corpus:/app/corpus:ro
+      - demo-data:/app/.data
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    command:
+      [
+        "sh",
+        "-c",
+        "python demo.py ingest && python -m uvicorn web.api:app --host 0.0.0.0 --port 8000",
+      ]
+    # `GET /api/health` (`web/api.py`) es un liveness check plano — lo usa
+    # `scripts/start-demo.sh` para no imprimir la URL final hasta que la
+    # ingesta terminó y uvicorn ya está sirviendo.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+      start_period: 15s
+
+  demo-aws:
+    build:
+      context: .
+      target: aws
+    image: second-brain-demo-aws:local
+    profiles: ["aws"]
+    env_file:
+      - .env
+    environment:
+      SECOND_BRAIN_MODE: aws
+    volumes:
+      - ./corpus:/app/corpus:ro
+    command: ["python", "demo.py", "--help"]
+
+  # El second brain como servidor A2A (demo de cierre, primer proceso):
+  # publica su Agent Card y responde con el loop agéntico completo. Corre
+  # su propio `ingest` antes de arrancar el server (mismo patrón que
+  # `demo`/`web`) para no depender del ciclo de vida de ningún otro
+  # servicio — solo de que FalkorDB esté sano — y para que quede
+  # garantizado que ve el mismo corpus ingestado que el resto (comparte el
+  # volumen `demo-data`, es idempotente si ya corrió). Host `0.0.0.0`
+  # (no `127.0.0.1`, el default de `demo.py`) para ser alcanzable desde
+  # fuera del contenedor y desde `a2a-client`.
+  #
+  # `--public-url` es OBLIGATORIO acá (verificado con un round-trip real
+  # sin él: el cliente revienta con `ConnectError` tratando de conectarse a
+  # `0.0.0.0`): sin esta bandera, la Agent Card anuncia `url` con el mismo
+  # host de bind (`0.0.0.0`), y ESO es lo que `a2a-client` intenta usar
+  # para conectarse después de descubrir la card — `0.0.0.0` no es una
+  # dirección a la que otro contenedor pueda conectarse. `--public-url`
+  # separa "dónde escucha uvicorn" de "qué dirección anunciarle a los
+  # demás agentes" (ver el docstring de `second_brain.a2a.server.build_a2a_app`).
+  a2a-server:
+    build:
+      context: .
+      target: a2a
+    image: second-brain-demo-a2a:local
+    profiles: ["a2a"]
+    ports:
+      - "9500:9500"
+    environment:
+      SECOND_BRAIN_MODE: local
+      SECOND_BRAIN_FALKOR_HOST: falkordb
+      SECOND_BRAIN_FALKOR_PORT: "6379"
+      SECOND_BRAIN_VECTOR_STORE_PATH: /app/.data/vector_store
+    volumes:
+      - ./corpus:/app/corpus:ro
+      - demo-data:/app/.data
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    command:
+      [
+        "sh",
+        "-c",
+        "python demo.py ingest && python demo.py a2a-server --host 0.0.0.0 --port 9500 --public-url http://a2a-server:9500/",
+      ]
+    # `curl` no está en la imagen (se mantiene chica, ver Dockerfile) — el
+    # propio Python del contenedor golpea la Agent Card, el mismo endpoint
+    # que `a2a-client` necesita para poder empezar.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9500/.well-known/agent-card.json', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+      start_period: 15s
+
+  # El "agente de soporte" (demo de cierre, segundo proceso): resuelve al
+  # server por `a2a-server`, el nombre del servicio de compose en la red
+  # interna — nunca `127.0.0.1`, que dentro de este contenedor sería él
+  # mismo. `demo.py a2a-client` ya expone `--endpoint` como argumento (no
+  # hardcodeado a `127.0.0.1`: ver `demo.py::a2a_client_cmd`), así que
+  # alcanza con pasarlo acá — no hizo falta tocar `demo.py`. `depends_on`
+  # con `service_healthy` es lo que reemplaza al polling manual de
+  # `make a2a-demo`/`make.ps1 a2a-demo` (esos corren en host, sin
+  # healthcheck de Docker disponible).
+  a2a-client:
+    build:
+      context: .
+      target: a2a
+    image: second-brain-demo-a2a:local
+    profiles: ["a2a"]
+    environment:
+      SECOND_BRAIN_MODE: local
+    depends_on:
+      a2a-server:
+        condition: service_healthy
+    command: ["python", "demo.py", "a2a-client", "--endpoint", "http://a2a-server:9500"]
+
+  # El second brain como servidor MCP, por `streamable-http` (no `stdio`,
+  # el default de `demo.py mcp-server`): dentro de un contenedor de
+  # compose no hay ningún proceso padre lanzando esto como subproceso y
+  # leyendo su stdout como canal de mensajes, así que `stdio` no sirve
+  # para un cliente externo — ver el README para esa distinción. El modo
+  # `stdio` sigue siendo el que usa un cliente MCP local (Claude Code)
+  # apuntando directo al proceso (`.venv312/Scripts/python.exe demo.py
+  # mcp-server`), fuera de Docker. Reusa la imagen `runtime` (`target:
+  # runtime`, la misma que `demo`): `mcp` llega transitivo de
+  # `strands-agents` base, no necesita el extra `[a2a]`.
+  mcp-server:
+    build:
+      context: .
+      target: runtime
+    image: second-brain-demo:local
+    profiles: ["mcp"]
+    ports:
+      - "8765:8765"
+    environment:
+      SECOND_BRAIN_MODE: local
+      SECOND_BRAIN_FALKOR_HOST: falkordb
+      SECOND_BRAIN_FALKOR_PORT: "6379"
+      SECOND_BRAIN_VECTOR_STORE_PATH: /app/.data/vector_store
+    volumes:
+      - ./corpus:/app/corpus:ro
+      - demo-data:/app/.data
+    depends_on:
+      falkordb:
+        condition: service_healthy
+    command:
+      [
+        "sh",
+        "-c",
+        "python demo.py ingest && python demo.py mcp-server --transport streamable-http --host 0.0.0.0 --port 8765",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 8765), timeout=2).close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+      start_period: 15s
+
+volumes:
+  falkordb-data:
+  demo-data:

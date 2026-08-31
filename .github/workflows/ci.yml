@@ -1,0 +1,67 @@
+name: demo-ci
+
+on:
+  push:
+    paths:
+      - "demo/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "demo/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: demo
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # FalkorDB como service container: es lo que prueba que la demo corre en
+    # cualquier lado, no solo en la máquina del speaker. El test marcado
+    # `docker` (tests/test_grafo.py::test_blast_radius_contra_falkordb_real)
+    # conecta a `localhost:6379` a propósito — el runner de Actions publica
+    # los puertos de los services en el host del job, así que ese `localhost`
+    # es real acá sin ningún truco de red adicional.
+    services:
+      falkordb:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar el paquete con extras de dev
+        run: pip install --no-cache-dir .[dev]
+
+      # No bloqueante a propósito (`|| true`): si el toolkit no se puede
+      # instalar en el runner (red, versión de GitHub Actions, etc.), el
+      # resto de la suite sigue corriendo con el fallback determinista —
+      # ver `src/second_brain/adapters/graphrag_toolkit.py`. Cuando SÍ se
+      # instala, `tests/test_graphrag_toolkit.py` deja de saltear el test
+      # que ejercita el conector real contra el FalkorDB del service.
+      - name: Instalar GraphRAG Toolkit real (best-effort)
+        run: |
+          pip install --no-cache-dir ".[graphrag]" \
+            && pip install --no-cache-dir hatchling hatch-requirements-txt \
+            && pip install --no-cache-dir --no-build-isolation \
+              "git+https://github.com/awslabs/graphrag-toolkit.git@218bf37382412cd1ff72d8a5f64755c012976bb4#subdirectory=lexical-graph-contrib/falkordb" \
+            || echo "GraphRAG Toolkit no se pudo instalar en CI, sigue con el fallback"
+
+      - name: Lint (ruff)
+        run: python -m ruff check src tests demo.py
+
+      - name: Tests (pytest completo, incluidos los `docker`)
+        run: python -m pytest -v
