@@ -2,12 +2,12 @@
 """Lee los CfnOutput de los stacks ya desplegados y escribe `../.env` en
 modo `aws` — para que nadie tenga que copiar ARNs/endpoints a mano en vivo.
 
-No escribe variables de FalkorDB: `GraphStack` se dio de baja (ver
-`stacks/agentcore_stack.py`, "Sin FalkorDB gestionado en AWS") y no hay
-ningún `CfnOutput` de grafo del que leerlas. `SECOND_BRAIN_FALKOR_HOST`/
-`FALKOR_PORT`/`FALKOR_GRAPH_NAME` quedan con sus defaults (`localhost`) en
-el `.env` que este script escribe; si el grafo va a vivir en un host remoto,
-esas tres variables se completan a mano.
+Variables de FalkorDB: por default el grafo es local y
+`SECOND_BRAIN_FALKOR_HOST` queda con su default (`localhost`). Pero si el
+`GraphStack` opcional está desplegado (`-c enable_graph_ec2=true`, FalkorDB
+en EC2 — ver `stacks/graph_stack.py`), este script lee su `FalkorHostOutput`
+y escribe `SECOND_BRAIN_FALKOR_HOST` con la IP pública de la instancia. El
+stack de grafo es el único opcional acá: si no existe, no es error.
 
 Uso (desde `demo/infra/`, con credenciales AWS activas y los stacks ya
 desplegados):
@@ -33,6 +33,9 @@ STACKS = [
     "SecondBrainAgentStack",
     "SecondBrainObservabilityStack",
 ]
+
+# Opcional: solo se lee si está desplegado (FalkorDB en EC2, bajo bandera).
+GRAPH_STACK = "SecondBrainGraphStack"
 
 # output_key -> variable SECOND_BRAIN_* que lee config.py (ver
 # src/second_brain/config.py y .env.example). Los outputs que no mapean a
@@ -67,6 +70,13 @@ def construir_env(region: str) -> str:
             if output_key in outputs:
                 valores[env_var] = outputs[output_key]
 
+    try:
+        outputs_grafo = _leer_outputs(cfn, GRAPH_STACK)
+    except Exception:
+        outputs_grafo = {}
+    if "FalkorHostOutput" in outputs_grafo:
+        valores["SECOND_BRAIN_FALKOR_HOST"] = outputs_grafo["FalkorHostOutput"]
+
     faltantes = set(OUTPUT_TO_ENV_VAR.values()) - set(valores)
     if faltantes:
         print(
@@ -87,7 +97,7 @@ def construir_env(region: str) -> str:
         "SECOND_BRAIN_BEDROCK_GUARDRAIL_TRACE=enabled",
         "",
     ]
-    for env_var in OUTPUT_TO_ENV_VAR.values():
+    for env_var in [*OUTPUT_TO_ENV_VAR.values(), "SECOND_BRAIN_FALKOR_HOST"]:
         if env_var in valores:
             lineas.append(f"{env_var}={valores[env_var]}")
     lineas.append("")

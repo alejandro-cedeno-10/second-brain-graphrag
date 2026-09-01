@@ -422,16 +422,19 @@ contra AWS: solo cambia una variable de entorno.
 1. Aprovisionar la infra con el CDK de [`infra/`](infra/README.md):
    `cdk bootstrap` + `cdk deploy --all` (4 stacks: storage, agente,
    observabilidad y, opcional bajo `enable_agentcore`, AgentCore — ver el
-   detalle y los costos en `infra/README.md`). No hay stack de grafo: no se
-   despliega ningún FalkorDB gestionado.
+   detalle y los costos en `infra/README.md`). Por default no se despliega
+   grafo; para el deploy completo con FalkorDB también en AWS (una EC2
+   chica, opt-in), sumá `-c enable_graph_ec2=true -c
+   falkor_allowed_cidr=<tu-ip>/32` — ver "Grafo en AWS (opcional)" en
+   `infra/README.md`.
 2. Generar el `.env` a partir de los outputs del deploy, sin copiar nada a
    mano: `make aws-env` (o `python infra/despues-del-deploy.py`). Escribe
    `SECOND_BRAIN_MODE=aws` y las variables `SECOND_BRAIN_*` (bucket/índice de
    S3 Vectors, id/versión del guardrail de Bedrock) leídas por
-   `src/second_brain/config.py`. El grafo NO sale de un output de CDK: sigue
-   las mismas `SECOND_BRAIN_FALKOR_HOST`/`FALKOR_PORT`/`FALKOR_GRAPH_NAME`
-   que el modo local (default `localhost`) — completalas a mano si el grafo
-   va a vivir en otro host.
+   `src/second_brain/config.py`. El grafo sigue las mismas
+   `SECOND_BRAIN_FALKOR_HOST`/`FALKOR_PORT`/`FALKOR_GRAPH_NAME` que el modo
+   local (default `localhost`); si desplegaste el `GraphStack` opcional, el
+   script escribe `SECOND_BRAIN_FALKOR_HOST` con la IP de esa EC2 solo.
 3. Instalar el extra `[aws]` (`pip install -e .[aws]`, o la imagen Docker con
    `target: aws`) — trae `boto3`, ausente de la imagen local por diseño.
 4. Correr con `SECOND_BRAIN_MODE=aws make demo-aws` (el target exige la
@@ -470,7 +473,7 @@ demo/
   web/
     api.py                # backend FastAPI: pipeline -> eventos AG-UI por SSE
     ui/                   # frontend Vue 3 + Vite (preguntas, traza, grafo)
-  infra/                  # CDK (Python): 4 stacks, `cdk deploy --all` (ver infra/README.md)
+  infra/                  # CDK (Python): 5 stacks (grafo opcional), `cdk deploy --all` (ver infra/README.md)
   tests/                  # pytest, incluye un test marcado `docker`
   Dockerfile              # multi-stage: base / runtime / test / aws / web / ui-build
   docker-compose.yml       # falkordb + demo + test (profile) + demo-aws (profile) + web (profile)

@@ -47,10 +47,15 @@ docstring de `stacks/agentcore_stack.py`
   su Service — reintroduce VPC y un costo fijo ~24/7 (~$9-10/mes mínimo), y
   el mismo dilema NAT-vs-endpoints si el Runtime necesita alcanzarlo desde
   fuera de esa VPC.
-- **(b)** *(el estado de hoy)* Dejar las variables en su default. El modo
+- **(b)** *(el default de hoy)* Dejar las variables en su default. El modo
   `aws` despliega la parte de recuperación (Bedrock + S3 Vectors + KB
   opcional) de verdad; el grafo se sigue mostrando en vivo desde el proceso
   local con FalkorDB, no desde el Runtime en AWS.
+- **(c)** *(opt-in, ya implementada)* FalkorDB en una EC2 chica con el
+  `GraphStack` opcional (`-c enable_graph_ec2=true`) — ver la sección
+  "Grafo en AWS (opcional)" más abajo. Resuelve el "todo corre en AWS" para
+  el proceso local que apunta allá; para alcanzarlo desde AgentCore Runtime
+  seguiría faltando red entre el Runtime y esa VPC.
 
 Esto **no se resuelve solo**: es una decisión del usuario antes de correr el
 agente dentro de AgentCore Runtime, no algo que este código elige por su
@@ -93,6 +98,14 @@ cdk deploy --all \
   -c budget_alert_email=vos@tu-correo.com \
   -c enable_knowledge_base=true \
   -c enable_agentcore=true
+
+# Deploy COMPLETO (todo lo anterior + el grafo también en AWS):
+cdk deploy --all \
+  -c budget_alert_email=vos@tu-correo.com \
+  -c enable_knowledge_base=true \
+  -c enable_agentcore=true \
+  -c enable_graph_ec2=true \
+  -c falkor_allowed_cidr=$(curl -s ifconfig.me)/32
 ```
 
 - `budget_alert_email` es el único contexto obligatorio para tener alertas.
@@ -107,9 +120,32 @@ cdk deploy --all \
   el build/push de la imagen del agente Strands es un paso manual posterior,
   fuera de este `cdk deploy` (no hay Dockerfile de esa imagen en este repo
   todavía).
-- Sin `GraphStack`, **ya no hay ninguna VPC en este CDK** — el `cdk synth`/
-  `cdk deploy` inicial ya no dispara el lookup de AZs que sí necesitaba
-  Neptune. `cdk.context.json` puede quedar vacío.
+- Sin `enable_graph_ec2`, **no hay ninguna VPC en este CDK** — el `cdk
+  synth`/`cdk deploy` mínimo no dispara el lookup de AZs que sí necesitaba
+  el viejo stack de Neptune. `cdk.context.json` puede quedar vacío.
+
+## Grafo en AWS (opcional): FalkorDB en EC2
+
+Por default el grafo corre en tu máquina (Docker) incluso en modo `aws` — ver
+la sección de arriba. Para el turno completo consumiendo AWS (p.ej. grabar la
+demo end-to-end), `enable_graph_ec2` suma `SecondBrainGraphStack`: una
+`t4g.small` (~US$0.017/h) en una VPC mínima propia (1 AZ, solo subnet
+pública, sin NAT) que corre el MISMO contenedor `falkordb/falkordb` que usás
+en local.
+
+- **El puerto 6379 no se abre a nadie por default.** FalkorDB no tiene
+  autenticación, así que el ingreso se habilita SOLO con tu CIDR:
+  `-c falkor_allowed_cidr=<tu-ip>/32` (o `SECOND_BRAIN_FALKOR_ALLOWED_CIDR`).
+  Sin ese contexto el stack despliega igual pero nada alcanza el puerto.
+- **Sin SSH**: administración por SSM
+  (`aws ssm start-session --target <FalkorInstanceIdOutput>`).
+- **El grafo es efímero**: si la instancia se recicla,
+  `python demo.py ingest` lo reconstruye del corpus en segundos.
+- `despues-del-deploy.py` detecta el stack y escribe
+  `SECOND_BRAIN_FALKOR_HOST=<ip pública>` en el `.env` — después de eso,
+  `SECOND_BRAIN_MODE=aws make demo-aws` (o la UI web) navega el grafo en esa
+  EC2 en vez del local.
+- Terminaste: `cdk destroy SecondBrainGraphStack` (o el `destroy --all`).
 
 ## Por qué no hay NAT Gateway ni ALB
 
