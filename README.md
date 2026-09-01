@@ -437,8 +437,27 @@ contra AWS: solo cambia una variable de entorno.
    script escribe `SECOND_BRAIN_FALKOR_HOST` con la IP de esa EC2 solo.
 3. Instalar el extra `[aws]` (`pip install -e .[aws]`, o la imagen Docker con
    `target: aws`) — trae `boto3`, ausente de la imagen local por diseño.
-4. Correr con `SECOND_BRAIN_MODE=aws make demo-aws` (el target exige la
+4. **Ingestar en AWS**: `python demo.py ingest` con el entorno del `.env`
+   cargado. El índice de S3 Vectors nace VACÍO — el `cdk deploy` crea el
+   índice, no lo llena. Sin este paso el modo `aws` no resuelve objetivos ni
+   navega el grafo: responde solo con lo que encuentre la búsqueda léxica y
+   el grounding del guardrail se desploma (0.56 medido, contra 0.92 con el
+   índice poblado). Verificado el 31-ago-2026 contra Bedrock real.
+5. Correr con `SECOND_BRAIN_MODE=aws make demo-aws` (el target exige la
    variable explícita — nunca dispara una llamada a AWS por accidente).
+
+> ⚠️ **La CLI no carga `demo/.env` sola**: eso lo hace `docker compose`. Desde
+> una terminal, `python demo.py ...` corre en modo LOCAL aunque el `.env` diga
+> `aws`, sin avisar. Es deliberado (ninguna corrida llama a AWS por accidente),
+> pero se confunde fácil en vivo. Cargalo explícito antes de los pasos 4 y 5:
+>
+> ```bash
+> set -a && source .env && set +a    # bash/zsh — sin esto, corre en local
+> python demo.py query --trace "Si modifico la API de core-billing, ¿qué módulos se rompen?"
+> ```
+>
+> Cómo saber que estás en AWS de verdad: el trace muestra la línea
+> `🧯 guardrail → grounding=… · relevance=…`, que en modo local no existe.
 
 Al terminar: `cdk destroy --all` desde `infra/` limpia todo (ver la nota
 sobre S3 Vectors no vacío en `infra/README.md`).
