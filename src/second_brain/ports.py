@@ -186,3 +186,51 @@ class LlmPort(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> LlmResponse: ...
+
+
+@dataclass
+class MemoryHint:
+    """Recuerdo recuperado de memoria: PISTA para el LLM, nunca EVIDENCIA.
+
+    Es el tipo que hace cumplir, por construcción, el invariante central de
+    la charla: nada que salga de memoria es una `Citation` ni entra a la
+    lista que consumen `evaluate_coverage`/`extract_citations`/
+    `validate_citations`/`validate_relational_claims` — esos siguen viendo
+    solo `Evidence`/`ScoredDoc`. Un `MemoryHint` viaja por un canal de texto
+    aparte hacia el LLM (ver `agent.memory.format_memory_hints`), nunca
+    mezclado en esa lista.
+
+    `kind` distingue el origen del recuerdo (`"hecho"`, `"preferencia"`,
+    `"turno_stm"`, ...). `namespace` refleja, cuando el backend lo tiene, el
+    namespace real de AgentCore Memory del que salió (p.ej.
+    `second_brain/{actor_id}/hechos`); `None` cuando no aplica (una ventana
+    de turnos recientes no vive en un namespace de estrategia administrada).
+    `score` es opcional porque no todo recuerdo es "puntuable": una
+    preferencia siempre se trae completa, y un turno de STM se trae por
+    recencia, no por relevancia semántica.
+    """
+
+    text: str
+    kind: str
+    namespace: str | None = None
+    score: float | None = None
+
+
+@runtime_checkable
+class MemoryPort(Protocol):
+    """Memoria de largo/corto plazo del agente: pista, nunca evidencia citable.
+
+    Puerto propio (no `strands.memory.types.MemoryStore`) a propósito: es
+    síncrono, como el resto de los puertos de este módulo, así el camino
+    fijo (`agent.orchestrator`) puede recordar sin importar nada de Strands.
+    Un adapter sobre un backend remoto (p.ej. AgentCore Memory) es
+    responsable de degradar en fail-open ante error de red o permisos:
+    `recall` nunca debe romper el turno — en el peor caso devuelve una
+    lista vacía.
+    """
+
+    def recall(self, actor_id: str, session_id: str, query: str) -> list[MemoryHint]: ...
+
+    def remember_turn(
+        self, actor_id: str, session_id: str, question: str, answer_text: str
+    ) -> None: ...

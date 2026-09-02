@@ -167,10 +167,23 @@ que lee `src/second_brain/config.py` (ver también `.env.example`):
 | `BedrockKnowledgeBaseIdOutput` | Storage (si `enable_knowledge_base`) | `SECOND_BRAIN_BEDROCK_KB_ID` |
 | `BedrockGuardrailIdOutput` | Agent | `SECOND_BRAIN_BEDROCK_GUARDRAIL_ID` |
 | `BedrockGuardrailVersionOutput` | Agent | `SECOND_BRAIN_BEDROCK_GUARDRAIL_VERSION` |
+| `AgentMemoryIdOutput` | AgentCore (si `enable_agentcore`) | `SECOND_BRAIN_AGENTCORE_MEMORY_ID` |
 
 `CorpusBucketNameOutput` y `AgentRoleArnOutput` son informativos — `config.py`
 no los lee hoy (el demo carga el corpus desde el filesystem local, no desde
 S3; el rol IAM es para cuando el agente corra como servicio, no para el CLI).
+
+**`AgentMemoryIdOutput` todavía NO está en `OUTPUT_TO_ENV_VAR`** (el dict que
+`despues-del-deploy.py` de verdad recorre): el `CfnOutput` ya declara el
+mapeo en su `description` (ver `stacks/agentcore_stack.py`), pero
+`make aws-env`/`python despues-del-deploy.py` hoy no lo escribe solo — es un
+gap conocido, no una decisión de diseño. Hasta que se agregue esa entrada,
+copiá el valor a mano desde el output del stack (`aws cloudformation
+describe-stacks --stack-name SecondBrainAgentCoreStack --query
+"Stacks[0].Outputs"`) a `SECOND_BRAIN_AGENTCORE_MEMORY_ID` en tu `.env`. Ver
+"Memoria del agente" en [`../README.md`](../README.md) para el resto de la
+activación (`SECOND_BRAIN_MEMORY_ENABLED` + `--actor-id`/`--session-id` +
+`--agentic`) y cómo se prueba en local sin tocar este recurso.
 
 En vez de copiar esos ARNs a mano en vivo, corré esto después del
 `cdk deploy --all`:

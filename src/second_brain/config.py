@@ -11,8 +11,18 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from second_brain.ports import EmbeddingsPort, GraphStorePort, LlmPort, RerankPort, VectorStorePort
+
+if TYPE_CHECKING:
+    # `MemoryPort` es del change `agregar-memoria-second-brain` (ver
+    # openspec/), cableado por otro workstream: bajo `TYPE_CHECKING` este
+    # import nunca corre en runtime (con `from __future__ import annotations`
+    # activo, la anotación de `Stack.memory` es un string, no un símbolo
+    # resuelto), así que `Stack`/`Settings` no dependen de que `ports.py` ya
+    # lo defina para seguir importando hoy.
+    from second_brain.ports import MemoryPort
 
 _PREFIX = "SECOND_BRAIN_"
 
@@ -24,6 +34,11 @@ def _env(name: str, default: str | None = None) -> str | None:
 def _env_int(name: str, default: int) -> int:
     valor = _env(name)
     return int(valor) if valor is not None else default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    valor = _env(name)
+    return valor.strip().lower() == "true" if valor is not None else default
 
 
 @dataclass(frozen=True)
@@ -76,6 +91,16 @@ class Settings:
     s3_vectors_bucket: str | None = None
     s3_vectors_index_name: str | None = None
 
+    # Memoria (AgentCore Memory en modo aws, FakeMemoryStore en modo local —
+    # ver openspec/changes/agregar-memoria-second-brain/). Apagada por
+    # default a propósito: activarla implica escritura (`CreateEvent`) además
+    # de lectura, así que nunca debe encenderse sola. `agentcore_memory_id`
+    # es específico de la cuenta: SIEMPRE vacío en `.env.example`, nunca
+    # hardcodeado ni commiteado con un valor real.
+    memory_enabled: bool = False
+    agentcore_memory_id: str | None = None
+    agentcore_actor_id: str = "demo-speaker"
+
     @classmethod
     def from_env(cls) -> Settings:
         return cls(
@@ -97,6 +122,9 @@ class Settings:
             bedrock_guardrail_trace=_env("BEDROCK_GUARDRAIL_TRACE", "enabled"),
             s3_vectors_bucket=_env("S3_VECTORS_BUCKET"),
             s3_vectors_index_name=_env("S3_VECTORS_INDEX_NAME"),
+            memory_enabled=_env_bool("MEMORY_ENABLED", False),
+            agentcore_memory_id=_env("AGENTCORE_MEMORY_ID"),
+            agentcore_actor_id=_env("AGENTCORE_ACTOR_ID", "demo-speaker"),
         )
 
 
@@ -109,6 +137,11 @@ class Stack:
     graph_store: GraphStorePort
     rerank: RerankPort
     llm: LlmPort
+    # `None` por default: memoria es pista, nunca evidencia, y solo existe
+    # cuando `Settings.memory_enabled` (+ el id de AgentCore, en modo aws) la
+    # activan explícitamente — ver `build_stack`. Con default, ningún
+    # `Stack(...)` existente (tests incluidos) se rompe.
+    memory: MemoryPort | None = None
 
 
 def build_stack(settings: Settings) -> Stack:
@@ -134,6 +167,12 @@ def _stack_local(settings: Settings) -> Stack:
     from second_brain.adapters.local.memory_vector_store import MemoryVectorStore
     from second_brain.adapters.local.scripted_llm import ScriptedLlm
 
+    memory: MemoryPort | None = None
+    if settings.memory_enabled:
+        from second_brain.adapters.local.fake_memory_store import FakeMemoryStore
+
+        memory = FakeMemoryStore()
+
     return Stack(
         embeddings=FakeEmbeddings(dim=settings.embeddings_dim),
         vector_store=MemoryVectorStore(persistence_path=settings.vector_store_path),
@@ -144,6 +183,7 @@ def _stack_local(settings: Settings) -> Stack:
         ),
         rerank=FakeRerank(),
         llm=ScriptedLlm(),
+        memory=memory,
     )
 
 
@@ -164,6 +204,14 @@ def _stack_aws(settings: Settings) -> Stack:
     from second_brain.adapters.aws.bedrock_rerank import BedrockRerank
     from second_brain.adapters.aws.s3_vectors_store import S3VectorsStore
     from second_brain.adapters.local.falkor_graph_store import FalkorGraphStore
+
+    memory: MemoryPort | None = None
+    if settings.memory_enabled and settings.agentcore_memory_id:
+        from second_brain.adapters.aws.agentcore_memory_store import AgentCoreMemoryStore
+
+        memory = AgentCoreMemoryStore(
+            memory_id=settings.agentcore_memory_id, region=settings.aws_region
+        )
 
     return Stack(
         embeddings=BedrockEmbeddings(
@@ -189,4 +237,5 @@ def _stack_aws(settings: Settings) -> Stack:
             guardrail_version=settings.bedrock_guardrail_version,
             guardrail_trace=settings.bedrock_guardrail_trace,
         ),
+        memory=memory,
     )

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import re
 import sys
@@ -189,6 +190,58 @@ _TEXTO_POR_DEFECTO = (
     "esas preguntas, o pasá SECOND_BRAIN_MODE=aws para respuestas reales "
     "vía Bedrock."
 )
+
+# --- Escenas de memoria (Acto 4, ver GUION_ACTO4_MEMORIA.md) ----------------
+#
+# Tres preguntas nuevas, deterministas SOLO en el camino agéntico local y
+# SOLO cuando memoria está REALMENTE activa para el turno (`stack.memory`
+# configurado + `--actor-id`/`--session-id` explícitos, ver
+# `build_agentic_scripted_llm`): a diferencia de P1..P_INCIDENTE, estas no
+# arman su respuesta con `_build_decide_response` sola — `_memory_scenario_rules`
+# primero decide llamar `recall_memory` y RECIÉN DESPUÉS sintetiza leyendo esa
+# pista en el resultado de la tool, igual que lo haría un modelo real guiado
+# por `agent.memory.MEMORY_PROMPT_ADDENDUM`.
+
+P_M1_SEGUIMIENTO = "¿y quién es el dueño?"
+"""M1 — seguimiento anafórico de P2 dentro de la MISMA sesión de `chat`: sin
+nombrar `core-billing`, la STM del turno anterior tiene que resolver el
+referente antes de que el guion busque evidencia real."""
+
+TEXTO_M1_SEGUIMIENTO = (
+    "El equipo de Plataforma es responsable de `core-billing` "
+    "[source:servicios/core-billing.md]."
+)
+
+SEMILLA_M2_PREFERENCIA = (
+    "Para mis consultas de riesgo técnico como esta, preferís ir directo al "
+    "impacto operativo: seguí citando los documentos, pero no desarrolles el "
+    "contenido de los ADRs ni postmortems que cites."
+)
+"""M2 — texto exacto a sembrar con `--seed-preferencia`. `_memory_scenario_rules`
+detecta esta MISMA constante (no una copia) en la pista que devuelve
+`recall_memory`, así que siembra y detección nunca pueden divergir en
+silencio."""
+
+TEXTO_P_BILLING_CON_PREFERENCIA = (
+    "`billing-2-0` depende de `auth-cache` [source:producto/billing-2-0.md]; "
+    "el equipo de Identidad es responsable de resolverlo "
+    "[source:servicios/auth-cache.md]. ADR-017 [source:arquitectura/decisiones.md] "
+    "e INC-042 [source:incidentes/postmortem-inc-042-auth-cache.md] no alcanzan "
+    "para atribuirles la causa del retraso."
+)
+"""Misma dependencia y mismo equipo que `_TEXTO_P_BILLING` (mismas 4 citas,
+mismo veredicto del gate): la preferencia sembrada en `SEMILLA_M2_PREFERENCIA`
+cambia el FORMATO (más corto, sin desarrollar ADR-017/INC-042 en prosa) —
+nunca los hechos que afirma ni las citas que usa."""
+
+SEMILLA_M3_HECHO_FALSO = (
+    "El equipo de Plataforma es responsable de resolver la dependencia de "
+    "auth-cache en Billing 2.0."
+)
+"""M3 — hecho FALSO a sembrar con `--seed-hecho`: el mismo puente
+Plataforma/auth-cache que `TEXTO_P_BILLING_INGENUO` ya demuestra que el
+anclaje al grafo degrada, ahora recuperado de memoria en vez de inventado
+por el LLM — misma respuesta (`TEXTO_P_BILLING_INGENUO`), origen distinto."""
 
 _CYPHER_TOP_ENTITIES = (
     "MATCH (n:Entidad)-[r:RELACION]-(m:Entidad) "
@@ -420,6 +473,63 @@ def _has_tool_result(messages: list[dict[str, Any]]) -> bool:
     )
 
 
+def _tool_result_texts(messages: list[dict[str, Any]]) -> list[str]:
+    """El texto de cada resultado de tool ya ejecutado en este turno — la
+    misma forma que ve el modelo real, así una regla de guion puede
+    "leer" lo que devolvió `recall_memory` para decidir qué sintetizar,
+    en vez de adivinarlo por otro canal.
+    """
+    textos = []
+    for mensaje in messages:
+        for bloque in mensaje.get("content", []):
+            resultado = bloque.get("toolResult")
+            if not resultado:
+                continue
+            for parte in resultado.get("content") or []:
+                texto = parte.get("text")
+                if texto:
+                    textos.append(texto)
+    return textos
+
+
+_EVIDENCE_TOOL_NAMES = frozenset({"search_documents", "traverse_graph"})
+
+
+def _tool_names_with_results(messages: list[dict[str, Any]]) -> set[str]:
+    """Qué tools YA devolvieron resultado en este turno — por el mismo
+    `toolUseId` con el que Strands empareja pedido y resultado, nunca por el
+    CONTENIDO del resultado: una pista de STM cita la respuesta completa del
+    turno anterior (ver `agent.memory.remember_turn_fail_open`), así que esa
+    pista puede contener textualmente `[source:...]` sin que eso signifique
+    que `search_documents`/`traverse_graph` ya corrieron este turno.
+    """
+    nombre_por_id: dict[str, str] = {}
+    for mensaje in messages:
+        for bloque in mensaje.get("content", []):
+            uso = bloque.get("toolUse")
+            if uso and uso.get("toolUseId") and uso.get("name"):
+                nombre_por_id[uso["toolUseId"]] = uso["name"]
+    nombres: set[str] = set()
+    for mensaje in messages:
+        for bloque in mensaje.get("content", []):
+            resultado = bloque.get("toolResult")
+            if not resultado:
+                continue
+            nombre = nombre_por_id.get(resultado.get("toolUseId"))
+            if nombre:
+                nombres.add(nombre)
+    return nombres
+
+
+def _has_evidence_result(messages: list[dict[str, Any]]) -> bool:
+    """Distingue "ya llegó evidencia citable" de "solo hubo memoria hasta
+    ahora", para secuenciar las fases del guion de M1 (nunca para un guard:
+    los guards reales siguen viviendo en `agent.guards`, ajenos a este
+    módulo de CLI).
+    """
+    return bool(_tool_names_with_results(messages) & _EVIDENCE_TOOL_NAMES)
+
+
 def _question_from_agentic_messages(messages: list[dict[str, Any]]) -> str:
     """El primer mensaje de la conversación con un `Agent` de Strands es
     siempre la pregunta original en texto plano (`[{"text": pregunta}]`) y
@@ -485,7 +595,143 @@ def _build_decide_response(question: str, stack: Stack) -> LlmResponse:
     )
 
 
-def build_agentic_scripted_llm(stack: Stack, naive: bool = False) -> ScriptedLlm:
+def _decide_billing_con_memoria(question: str, stack: Stack) -> LlmResponse:
+    """Igual que `_build_decide_response` para `P_BILLING`, pero con
+    `recall_memory` primero en el mismo batch — la misma forma que ya
+    verificó `tests/test_strands_agent_memory.py` a mano: el modelo real
+    puede pedir memoria y evidencia en una sola decisión, sin que eso le
+    impida al gate diferir/evaluar cobertura correctamente después.
+    """
+    decision = _build_decide_response(question, stack)
+    llamada_memoria = ToolCall(name="recall_memory", arguments={"query": question}, id="m0")
+    return replace(decision, tool_calls=[llamada_memoria, *decision.tool_calls])
+
+
+def _con_marca_de_memoria(condicion: ScriptedCondition, marca: str) -> ScriptedCondition:
+    """Agrega a `condicion` (una fase ya resuelta, p.ej. `phase="draft"`) el
+    requisito de que `marca` (el texto EXACTO sembrado con `--seed-hecho`/
+    `--seed-preferencia`) aparezca en lo que devolvió alguna tool de este
+    turno — así el guion "lee" la pista de memoria antes de elegir qué
+    sintetizar, en vez de decidirlo solo por qué pregunta es.
+    """
+
+    def cuando(system: str, messages: list[dict[str, Any]]) -> bool:
+        return condicion(system, messages) and marca in "\n".join(_tool_result_texts(messages))
+
+    return cuando
+
+
+def _m1_seguimiento_coincide(system: str, messages: list[dict[str, Any]]) -> bool:
+    preguntados = _distinctive_terms(_question_from_agentic_messages(messages))
+    return _similarity(_distinctive_terms(P_M1_SEGUIMIENTO), preguntados) >= 0.5
+
+
+_M1_ENTIDAD_ANTECEDENTE = "core-billing"
+
+
+def _m1_antecedente_en_memoria(messages: list[dict[str, Any]]) -> bool:
+    """El guion RECIÉN decide anclar la búsqueda a `core-billing` si esa
+    entidad aparece de verdad en lo que devolvió `recall_memory` (la STM del
+    turno anterior) — nunca a ciegas. Una sesión sin ese turno previo (ver
+    GUION_ACTO4_MEMORIA.md, gotcha de M1) no tiene antecedente que resolver,
+    así que ninguna regla de la fase 2 matchea y el turno cae al mismo
+    camino de abstención honesta que cualquier pregunta sin evidencia.
+    """
+    return any(_M1_ENTIDAD_ANTECEDENTE in texto for texto in _tool_result_texts(messages))
+
+
+def _m1_seguimiento_rules() -> list[ScriptedRule]:
+    """M1 en tres fases (no dos, como el resto del guion agéntico): decidir
+    `recall_memory` sola, decidir `search_documents` SOLO si la STM
+    recuperada de verdad menciona `core-billing`, y recién ahí redactar.
+    `_has_evidence_result` (no `_has_tool_result`) separa la fase 2 de la 3:
+    después de la primera tool call solo hay un resultado de memoria en los
+    mensajes, nunca uno con `[source:...]`.
+    """
+    return [
+        ScriptedRule(
+            when=lambda system, messages: (
+                _m1_seguimiento_coincide(system, messages) and not _has_tool_result(messages)
+            ),
+            response=LlmResponse(
+                tool_calls=[
+                    ToolCall(name="recall_memory", arguments={"query": P_M1_SEGUIMIENTO}, id="m1")
+                ],
+                stop_reason="tool_use",
+            ),
+        ),
+        ScriptedRule(
+            when=lambda system, messages: (
+                _m1_seguimiento_coincide(system, messages)
+                and _has_tool_result(messages)
+                and not _has_evidence_result(messages)
+                and _m1_antecedente_en_memoria(messages)
+            ),
+            response=LlmResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="search_documents",
+                        arguments={
+                            "question": "¿quién es el equipo dueño de core-billing?",
+                            "target": _M1_ENTIDAD_ANTECEDENTE,
+                        },
+                        id="t1",
+                    )
+                ],
+                stop_reason="tool_use",
+            ),
+        ),
+        ScriptedRule(
+            when=lambda system, messages: (
+                _m1_seguimiento_coincide(system, messages) and _has_evidence_result(messages)
+            ),
+            response=LlmResponse(text=TEXTO_M1_SEGUIMIENTO, stop_reason="end_turn"),
+        ),
+    ]
+
+
+def _memory_scenario_rules(
+    stack: Stack,
+    guiones_agenticos: list[tuple[str, str | None]],
+    terminos_por_guion: list[frozenset[str]],
+) -> list[ScriptedRule]:
+    """Las reglas EXTRA de las tres escenas de memoria del Acto 4 (ver
+    GUION_ACTO4_MEMORIA.md), activas SOLO cuando `build_agentic_scripted_llm`
+    determinó que memoria está realmente encendida para este turno.
+
+    Van ANTES que las reglas genéricas por pregunta en `reglas` (el orden
+    que arma `build_agentic_scripted_llm`) para poder interceptar
+    `P_BILLING` — M2 y M3 preguntan literalmente lo mismo que el gancho de
+    apertura, a propósito (ver el docstring de `SEMILLA_M3_HECHO_FALSO`):
+    sin esta prioridad, la regla genérica del guion de 10 preguntas
+    respondería primero y memoria nunca se llegaría a leer.
+    """
+    indice_billing = next(
+        indice for indice, (pregunta, _) in enumerate(guiones_agenticos) if pregunta == P_BILLING
+    )
+    decidir_billing = _agentic_script_wins(indice_billing, terminos_por_guion, phase="decide")
+    redactar_billing = _agentic_script_wins(indice_billing, terminos_por_guion, phase="draft")
+    return [
+        *_m1_seguimiento_rules(),
+        ScriptedRule(when=decidir_billing, response=_decide_billing_con_memoria(P_BILLING, stack)),
+        ScriptedRule(
+            when=_con_marca_de_memoria(redactar_billing, SEMILLA_M2_PREFERENCIA),
+            response=LlmResponse(text=TEXTO_P_BILLING_CON_PREFERENCIA, stop_reason="end_turn"),
+        ),
+        ScriptedRule(
+            when=_con_marca_de_memoria(redactar_billing, SEMILLA_M3_HECHO_FALSO),
+            response=LlmResponse(text=TEXTO_P_BILLING_INGENUO, stop_reason="end_turn"),
+        ),
+    ]
+
+
+def build_agentic_scripted_llm(
+    stack: Stack,
+    naive: bool = False,
+    *,
+    actor_id: str | None = None,
+    session_id: str | None = None,
+) -> ScriptedLlm:
     """El guion del camino agéntico: mismas síntesis que `build_scripted_llm`
     (P1, P2, P4, P5 y los 5 casos "wow"; P3 nunca redacta) pero partidas en
     dos fases por pregunta — decidir la tool, después redactar — para que
@@ -501,10 +747,28 @@ def build_agentic_scripted_llm(stack: Stack, naive: bool = False) -> ScriptedLlm
     fase de redacción de `P_BILLING` por `TEXTO_P_BILLING_INGENUO` (la fase
     de decisión de tools no cambia, porque decidir qué buscar no es lo que
     el guion ingenuo demuestra).
+
+    `actor_id`/`session_id` son SOLO para que este guion sepa si memoria va
+    a estar realmente activa este turno — la misma cuenta que hace
+    `agent.strands_agent.answer_agentic` (`stack.memory is not None and
+    actor_id and session_id`), nunca una capa nueva de activación. Con las
+    tres condiciones ciertas, `_memory_scenario_rules` agrega las reglas de
+    M1 (seguimiento anafórico, ver `P_M1_SEGUIMIENTO`) y M2/M3 (preferencia
+    y hecho falso sobre `P_BILLING`, ver `SEMILLA_M2_PREFERENCIA`/
+    `SEMILLA_M3_HECHO_FALSO`) ANTES que las genéricas. Sin las tres, ni una
+    sola regla nueva se agrega: el guion agéntico de las 10 preguntas queda
+    byte a byte el de antes, porque ninguna de sus reglas cambia y
+    `recall_memory` ni siquiera existe como tool para que el modelo la
+    intente llamar (ver `agent.strands_tools.build_tools`).
     """
     guiones_agenticos = _agentic_scripts(naive)
     terminos_por_guion = [_distinctive_terms(pregunta) for pregunta, _ in guiones_agenticos]
-    reglas: list[ScriptedRule] = []
+    memoria_activa = stack.memory is not None and bool(actor_id) and bool(session_id)
+    reglas: list[ScriptedRule] = (
+        _memory_scenario_rules(stack, guiones_agenticos, terminos_por_guion)
+        if memoria_activa
+        else []
+    )
     for indice, (pregunta, texto) in enumerate(guiones_agenticos):
         reglas.append(
             ScriptedRule(
@@ -539,7 +803,13 @@ def _resolve_settings() -> Settings:
     return settings
 
 
-def _build_cli_stack(settings: Settings, agentic: bool = False, naive: bool = False) -> Stack:
+def _build_cli_stack(
+    settings: Settings,
+    agentic: bool = False,
+    naive: bool = False,
+    actor_id: str | None = None,
+    session_id: str | None = None,
+) -> Stack:
     """Arma el stack de la CLI. `agentic` y `naive` solo importan en modo
     local: eligen entre el guion determinista (`build_scripted_llm`) y el
     guion en dos fases del loop agéntico (`build_agentic_scripted_llm`), y
@@ -548,6 +818,16 @@ def _build_cli_stack(settings: Settings, agentic: bool = False, naive: bool = Fa
     el mismo `BedrockLlm` real sin importar `naive` — el guion ingenuo es
     una pieza de la demo local, no algo que se le pueda pedir a un modelo
     real que finja.
+
+    `actor_id`/`session_id` solo le importan a `agentic` (se descartan en
+    el resto de las ramas): son lo único que necesita
+    `build_agentic_scripted_llm` para saber si las escenas de memoria del
+    guion (M1/M2/M3) tienen que agregarse — la misma cuenta de tres capas
+    que ya hace `answer_agentic`, nunca una activación nueva. Quien llama
+    (`query`/`chat`) ya los tiene parseados en este punto, así que
+    encadenarlos acá no le agrega ninguna capa de configuración extra al
+    resto de los comandos (`check`, `ingest`, `graph-top`, ...), que
+    siguen sin pasarlos.
     """
     if settings.vector_store_path:
         RutaArchivo(settings.vector_store_path).parent.mkdir(parents=True, exist_ok=True)
@@ -555,7 +835,9 @@ def _build_cli_stack(settings: Settings, agentic: bool = False, naive: bool = Fa
     if settings.mode == "aws":
         interno = stack.llm
     elif agentic:
-        interno = build_agentic_scripted_llm(stack, naive=naive)
+        interno = build_agentic_scripted_llm(
+            stack, naive=naive, actor_id=actor_id, session_id=session_id
+        )
     else:
         interno = build_scripted_llm(naive=naive)
     stack.llm = CapturingLlm(interno)
@@ -566,6 +848,75 @@ def _build_cli_lexical_index() -> LexicalIndex:
     documentos = load_corpus(RUTA_CORPUS_DEFAULT)
     chunks = [chunk for doc in documentos for chunk in chunk_document(doc)]
     return build_lexical_index(chunks)
+
+
+def _invoke_responder(
+    responder: Callable[..., Answer],
+    question: str,
+    stack: Stack,
+    lexical_index: LexicalIndex,
+    *,
+    actor_id: str | None,
+    session_id: str | None,
+) -> Answer:
+    """Llama a `answer`/`answer_agentic` encadenando `actor_id`/`session_id`
+    SOLO si la firma ya los acepta.
+
+    `agent.strands_agent.answer_agentic` ya declara ambos parámetros
+    (keyword-only, default `None`, ver su docstring): a ese camino le llegan
+    siempre, incluso cuando son `None` — es lo que mantiene la memoria
+    inactiva en un turno sin `--actor-id`/`--session-id` explícitos, aunque
+    el backend esté configurado. `agent.orchestrator.answer` (camino fijo)
+    todavía NO los declara: es la única razón por la que este shim (vía
+    `inspect.signature`) sigue existiendo — sin él, invocar el camino fijo
+    con estos kwargs fallaría con un `TypeError`. En cuanto esa firma se
+    extienda, este shim empieza a encadenarlos de verdad ahí también, sin
+    tocar `demo.py` de nuevo.
+    """
+    parametros = inspect.signature(responder).parameters
+    extra: dict[str, str | None] = {}
+    if "actor_id" in parametros:
+        extra["actor_id"] = actor_id
+    if "session_id" in parametros:
+        extra["session_id"] = session_id
+    return responder(question, stack, lexical_index, **extra)
+
+
+def _seed_local_memory(
+    stack: Stack, actor_id: str, hechos: list[str], preferencias: list[str]
+) -> None:
+    """Siembra hechos/preferencias en `stack.memory` (p.ej. `FakeMemoryStore`
+    en modo local) antes de responder, para poder grabar en un solo proceso
+    los escenarios de memoria (preferencia/hecho falso) sin depender de la
+    extracción asíncrona real de AgentCore.
+
+    `seed_hecho`/`seed_preferencia` no son parte de `MemoryPort` (son solo
+    del adapter local, ver `second_brain.adapters.local.fake_memory_store.FakeMemoryStore`),
+    así que esta función es tolerante: sin memoria activa, o con un backend
+    que no las expone (AgentCore en modo aws), avisa por consola y no hace
+    nada — nunca rompe el turno.
+    """
+    if not (hechos or preferencias):
+        return
+    if stack.memory is None:
+        console.print(
+            "[yellow]⚠ --seed-hecho/--seed-preferencia sin efecto: memoria "
+            "desactivada (hace falta SECOND_BRAIN_MEMORY_ENABLED=true).[/]"
+        )
+        return
+    if not hasattr(stack.memory, "seed_hecho"):
+        console.print(
+            "[yellow]⚠ --seed-hecho/--seed-preferencia sin efecto: el backend "
+            "de memoria activo no soporta siembra manual (solo FakeMemoryStore "
+            "la expone, en modo local).[/]"
+        )
+        return
+    for texto in hechos:
+        stack.memory.seed_hecho(actor_id, texto)
+        console.print(f"[dim]🧠 hecho sembrado ({actor_id}):[/] {_escape_markup(texto)}")
+    for texto in preferencias:
+        stack.memory.seed_preferencia(actor_id, texto)
+        console.print(f"[dim]🧠 preferencia sembrada ({actor_id}):[/] {_escape_markup(texto)}")
 
 
 def _step(traza: list[TraceStep], stage: str) -> TraceStep | None:
@@ -660,6 +1011,7 @@ def _print_trace(stack: Stack, answer: Answer) -> None:
     else:
         tipo_pregunta = "simple"
     console.print(f"🧠 orquestador → pregunta {tipo_pregunta} detectada")
+    _print_memory_trace(traza, _MEMORIA_LECTURA)
 
     resultados_busqueda = 0
     if paso_buscador and paso_buscador.metadata:
@@ -697,7 +1049,32 @@ def _print_trace(stack: Stack, answer: Answer) -> None:
         )
         _print_relational_claims(traza)
 
+    _print_memory_trace(traza, _MEMORIA_ESCRITURA)
     console.print(f"📤 respuesta con {len(answer.citations)} citas")
+
+
+def _print_memory_trace(traza: list[TraceStep], etapas: tuple[tuple[str, str], ...]) -> None:
+    """Muestra las líneas de memoria del turno, en el orden en que ocurren.
+
+    La lectura va arriba de la traza y la escritura al final a propósito: la
+    traza de la demo se lee como una línea de tiempo, y un `💾 turno guardado`
+    impreso antes de la búsqueda haría creer que se guardó algo que todavía no
+    existía. Solo lee `TraceStep.detail`, sin asumir metadata específica.
+    """
+    for stage, icono in etapas:
+        paso = _step(traza, stage)
+        if paso:
+            console.print(f"{icono} memoria    → {paso.detail}")
+
+
+_MEMORIA_LECTURA = (
+    ("herramienta.recordar_memoria", "🧠"),
+    ("herramienta.recordar_memoria.error", "🧠"),
+)
+_MEMORIA_ESCRITURA = (
+    ("memoria.guardado", "💾"),
+    ("memoria.guardado.error", "💾"),
+)
 
 
 def _print_relational_claims(traza: list[TraceStep]) -> None:
@@ -766,6 +1143,43 @@ def query(
             "no es un modo de producción."
         ),
     ),
+    actor_id: str | None = typer.Option(
+        None,
+        "--actor-id",
+        help=(
+            "Actor que 'recuerda' — la CLI NUNCA sintetiza un default acá: "
+            "sin esta bandera (y sin --session-id) la memoria queda inactiva "
+            "para este turno aunque SECOND_BRAIN_MEMORY_ENABLED esté en true."
+        ),
+    ),
+    session_id: str | None = typer.Option(
+        None,
+        "--session-id",
+        help=(
+            "Sesión a compartir entre invocaciones para encadenar preguntas "
+            "(p.ej. una referencia anafórica sobre la pregunta anterior) Y "
+            "activar memoria para este turno. Sin ella, cada `query` es una "
+            "sesión nueva Y la memoria queda inactiva — nunca se genera un "
+            "id al azar por su cuenta (tercera capa de activación, ver "
+            "`agent.strands_agent.answer_agentic`)."
+        ),
+    ),
+    seed_hecho: list[str] | None = typer.Option(  # noqa: B008 - patrón típico de typer para opciones repetibles
+        None,
+        "--seed-hecho",
+        help=(
+            "Siembra un 'hecho' en memoria local antes de responder "
+            "(repetible; requiere modo local con memoria activa)."
+        ),
+    ),
+    seed_preferencia: list[str] | None = typer.Option(  # noqa: B008 - idem --seed-hecho
+        None,
+        "--seed-preferencia",
+        help=(
+            "Siembra una preferencia de usuario en memoria local antes de "
+            "responder (repetible; ídem --seed-hecho)."
+        ),
+    ),
 ) -> None:
     """Responde `question` contra el stack ya ingestado (correr `ingest` antes).
 
@@ -783,6 +1197,23 @@ def query(
     causal) y el después (`agent.guards.validate_relational_claims`
     degradándolo) — es un guion de demostración, no un modo de producción,
     y sin la bandera el comportamiento es idéntico al de siempre.
+
+    `--actor-id`/`--session-id` identifican quién pregunta y qué conversación
+    es, para memoria (ver `openspec/changes/agregar-memoria-second-brain/`):
+    se encadenan tal cual hacia `answer`/`answer_agentic` (ver
+    `_invoke_responder`) — SIN sintetizar ningún default truthy cuando
+    faltan. Es la tercera capa de activación de memoria (ver el docstring
+    de `agent.strands_agent.answer_agentic`): con cualquiera de las dos
+    ausente, el turno se comporta exactamente como si memoria no existiera,
+    aunque el backend esté configurado (`SECOND_BRAIN_MEMORY_ENABLED=true` +
+    id de AgentCore) — ninguna llamada a AWS por memoria depende solo de esa
+    configuración de servidor. `--seed-hecho`/`--seed-preferencia` siembran
+    memoria local antes de responder, en el MISMO proceso (necesario:
+    `FakeMemoryStore` vive solo en RAM, no persiste entre invocaciones de
+    `query` — para encadenar varios turnos de verdad, usar el comando
+    `chat`); la siembra en sí no depende de `--actor-id`/`--session-id`
+    (nunca toca AWS), pero solo tiene efecto OBSERVABLE en este turno si
+    además se pasan ambas banderas para activar memoria.
     """
     settings = _resolve_settings()
     if naive and settings.mode != "local":
@@ -790,11 +1221,23 @@ def query(
             "[yellow]⚠ --naive es un guion de demostración de la CLI local: "
             "no tiene efecto en modo 'aws' (ahí responde el LLM real).[/]"
         )
-    stack = _build_cli_stack(settings, agentic=agentic, naive=naive)
+    stack = _build_cli_stack(
+        settings, agentic=agentic, naive=naive, actor_id=actor_id, session_id=session_id
+    )
+    _seed_local_memory(
+        stack, actor_id or settings.agentcore_actor_id, seed_hecho or [], seed_preferencia or []
+    )
     indice = _build_cli_lexical_index()
 
     responder = answer_agentic if agentic else answer
-    respuesta = responder(question, stack, indice)
+    respuesta = _invoke_responder(
+        responder,
+        question,
+        stack,
+        indice,
+        actor_id=actor_id,
+        session_id=session_id,
+    )
 
     if naive and settings.mode == "local":
         console.print(
@@ -805,6 +1248,104 @@ def query(
     if trace:
         _print_trace(stack, respuesta)
     _print_answer(respuesta)
+
+
+_CHAT_META_COMMANDS = (":salir", ":exit", ":quit")
+_CHAT_SEED_HECHO_PREFIX = ":seed-hecho "
+_CHAT_SEED_PREFERENCIA_PREFIX = ":seed-preferencia "
+
+
+@app.command()
+def chat(
+    agentic: bool = typer.Option(
+        False, "--agentic", help="Usar el loop agéntico en vez del pipeline fijo."
+    ),
+    naive: bool = typer.Option(False, "--naive", help="Ver `query --naive`; mismo guion acá."),
+    actor_id: str | None = typer.Option(
+        None,
+        "--actor-id",
+        help=(
+            "Actor que 'recuerda'. Sin esta bandera (y sin --session-id) la "
+            "memoria queda inactiva para TODO el chat, aunque "
+            "SECOND_BRAIN_MEMORY_ENABLED esté en true — la CLI nunca "
+            "sintetiza un default acá."
+        ),
+    ),
+    session_id: str | None = typer.Option(
+        None,
+        "--session-id",
+        help=(
+            "Sesión a usar para todo el chat, y la que activa memoria "
+            "(junto con --actor-id). Sin ella, nunca se genera un id al "
+            "azar por su cuenta: la memoria queda inactiva para toda la "
+            "corrida (tercera capa de activación, ver "
+            "`agent.strands_agent.answer_agentic`)."
+        ),
+    ),
+    trace: bool = typer.Option(False, "--trace", help="Mostrar el trace de cada turno."),
+) -> None:
+    """REPL de un solo proceso: un único `Stack` y una única sesión para
+    todas las preguntas de la corrida.
+
+    Existe específicamente para grabar en vivo los escenarios de memoria de
+    sesión (STM): `FakeMemoryStore` (ver
+    `openspec/changes/agregar-memoria-second-brain/design.md`, Decisión 10)
+    vive solo en RAM del `Stack` en curso, así que dos invocaciones
+    separadas de `query` nunca comparten memoria — acá sí, porque el `Stack`
+    y la sesión se arman una sola vez y sobreviven mientras dure el chat.
+    Igual que en `query`, memoria queda inactiva salvo que se pasen
+    `--actor-id` Y `--session-id` explícitos al arrancar el chat: sin
+    ambos, la corrida entera se comporta exactamente como si memoria no
+    existiera, sin importar la configuración del servidor.
+
+    Comandos especiales (no son preguntas): `:seed-hecho <texto>`,
+    `:seed-preferencia <texto>` (siembran memoria local, ver
+    `_seed_local_memory`; no dependen de `--actor-id`/`--session-id` porque
+    nunca tocan AWS, pero solo tienen efecto observable si además memoria
+    está activa) y `:salir` (o Ctrl+D/Ctrl+C) para terminar.
+    """
+    settings = _resolve_settings()
+    stack = _build_cli_stack(
+        settings, agentic=agentic, naive=naive, actor_id=actor_id, session_id=session_id
+    )
+    indice = _build_cli_lexical_index()
+    responder = answer_agentic if agentic else answer
+    actor_para_siembra = actor_id or settings.agentcore_actor_id
+    memoria_activa = bool(actor_id) and bool(session_id)
+
+    etiqueta_actor = actor_id if memoria_activa else f"{actor_para_siembra} (memoria inactiva)"
+    etiqueta_sesion = session_id if memoria_activa else "sin sesión (memoria inactiva)"
+    console.print(
+        f"[cyan]Second brain — chat[/] (actor=[bold]{_escape_markup(etiqueta_actor)}[/], "
+        f"sesión=[bold]{_escape_markup(etiqueta_sesion)}[/]). "
+        ":seed-hecho / :seed-preferencia / :salir disponibles.\n"
+    )
+    while True:
+        try:
+            entrada = console.input("[bold]› [/]").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            break
+        if not entrada:
+            continue
+        if entrada in _CHAT_META_COMMANDS:
+            break
+        if entrada.startswith(_CHAT_SEED_HECHO_PREFIX):
+            _seed_local_memory(
+                stack, actor_para_siembra, [entrada[len(_CHAT_SEED_HECHO_PREFIX) :]], []
+            )
+            continue
+        if entrada.startswith(_CHAT_SEED_PREFERENCIA_PREFIX):
+            _seed_local_memory(
+                stack, actor_para_siembra, [], [entrada[len(_CHAT_SEED_PREFERENCIA_PREFIX) :]]
+            )
+            continue
+        respuesta = _invoke_responder(
+            responder, entrada, stack, indice, actor_id=actor_id, session_id=session_id
+        )
+        if trace:
+            _print_trace(stack, respuesta)
+        _print_answer(respuesta)
 
 
 @app.command("graph-top")
