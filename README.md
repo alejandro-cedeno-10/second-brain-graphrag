@@ -198,6 +198,7 @@ pip install --no-build-isolation \
 | `python demo.py query "<pregunta>"` | Responde con sus citas, por el pipeline fijo (`agent.orchestrator.answer`). |
 | `python demo.py query --agentic "<pregunta>"` | Igual, pero por el loop agéntico: un `Agent` de Strands decide cuándo llamar a las tools (ver la sección de abajo). |
 | `python demo.py query --trace "<pregunta>"` | Muestra el pipeline paso a paso (orquestador → buscador → navegador → gate → guards → respuesta). Combina con `--agentic`. |
+| `python demo.py chat --agentic --actor-id <id> --session-id <id>` | REPL de un solo proceso (un único `Stack`/sesión para todas las preguntas) — necesario para demostrar en vivo la memoria de sesión (STM), que no sobrevive entre invocaciones sueltas de `query`. Ver "Memoria del agente" abajo. |
 | `python demo.py graph-top` | Top entidades del grafo por conexiones — el cierre de la demo, señala el hub. |
 | `python demo.py check` | Corre las 10 preguntas del guion en LOS DOS caminos (fijo y agéntico) y valida verde/rojo el comportamiento esperado de cada una — 20 verificaciones en total. |
 | `python demo.py mcp-server` | El second brain como servidor MCP (sus tools, para otros agentes). Ver la sección de abajo. |
@@ -261,6 +262,185 @@ la vista pensada para la demo, la segunda es la vista operativa que un
 backend real (CloudWatch GenAI Observability, Jaeger, cualquier collector
 OTLP) consumiría en producción. Apagada por default — cero costo si no se
 usa.
+
+## Memoria del agente: pista, nunca evidencia (STM de sesión + LTM de hechos/preferencias)
+
+Capítulo opt-in de la charla: el agente puede recordar entre turnos y entre
+sesiones, pero la memoria **nunca** se convierte en evidencia citable — es
+una pista más para el LLM, sujeta al mismo escrutinio que su propia prosa.
+Vive hoy **solo en el camino agéntico** (`--agentic`); `agent/orchestrator.py`
+(el pipeline fijo) todavía no la usa.
+
+| Pieza | Dónde vive |
+|---|---|
+| Contrato (`MemoryHint`, `MemoryPort`) | [`src/second_brain/ports.py`](src/second_brain/ports.py) |
+| Backend local, RAM (sin AWS) | [`src/second_brain/adapters/local/fake_memory_store.py`](src/second_brain/adapters/local/fake_memory_store.py) — `FakeMemoryStore` |
+| Backend AWS real | [`src/second_brain/adapters/aws/agentcore_memory_store.py`](src/second_brain/adapters/aws/agentcore_memory_store.py) — `AgentCoreMemoryStore`, sobre el data plane `bedrock-agentcore` (`CreateEvent`/`RetrieveMemoryRecords`/`ListEvents`) |
+| Fail-open + formateo del bloque de pistas + addendum de prompt | [`src/second_brain/agent/memory.py`](src/second_brain/agent/memory.py) |
+| La tool `recall_memory` (tercera tool, junto a `search_documents`/`traverse_graph`) | [`src/second_brain/agent/strands_tools.py`](src/second_brain/agent/strands_tools.py) — `build_tools` |
+| Traza (`herramienta.recordar_memoria`, `memoria.guardado`) | [`src/second_brain/agent/tool_trace_hook.py`](src/second_brain/agent/tool_trace_hook.py) / `demo.py::_print_memory_trace` |
+
+**Las tres capas**, todas detrás de `MemoryPort.recall`/`.remember_turn`:
+
+| Capa | Qué guarda | Backend local (`FakeMemoryStore`) | Backend AWS (`AgentCoreMemoryStore`) |
+|---|---|---|---|
+| STM de sesión | Los últimos turnos (pregunta+respuesta) de un `(actor_id, session_id)` | Lista en RAM del proceso | AgentCore Memory — `ListEvents`/`CreateEvent` sobre la sesión |
+| LTM de hechos | Afirmaciones sembradas/recordadas por actor | `seed_hecho(actor_id, texto)` | Estrategia administrada `SEMANTIC`, namespace `second_brain/{actorId}/hechos` |
+| LTM de preferencias | Preferencias de formato del actor (nunca hechos) | `seed_preferencia(actor_id, texto)` | Estrategia administrada `USER_PREFERENCE`, namespace `second_brain/{actorId}/preferencias` |
+
+El recurso AgentCore Memory (`second_brain_memory`, declarado en
+[`infra/stacks/agentcore_stack.py`](infra/stacks/agentcore_stack.py), STM con
+expiración de 30 días) ya existe en la cuenta de la charla — este repo nunca
+hardcodea su id: lo lee de `SECOND_BRAIN_AGENTCORE_MEMORY_ID` (ver
+"Activación" abajo).
+
+### La regla de diseño: memoria es pista, nunca evidencia
+
+Nada que salga de `recall_memory` puede volverse una `Citation` ni contar
+para el coverage gate: el tipo que lo transporta, `ports.MemoryHint`, nunca
+entra a la lista `Evidence` que consumen `evaluate_coverage`/
+`extract_citations`/`validate_citations`/`validate_relational_claims` —
+`agent/strands_tools.py::EvidenceCollector` los mantiene en campos
+separados (`items` vs. `memory_hints`) a propósito, así que mezclarlos no es
+solo improbable, es estructuralmente imposible. Dos consecuencias,
+verificadas con tests, no solo prometidas:
+
+1. **Un turno sostenido SOLO por memoria sigue abstiniéndose.** Si el
+   modelo llama `recall_memory`, no llama ninguna tool de evidencia real, y
+   redacta igual citando el recuerdo como si fuera una fuente
+   (`[source:memoria]`), `answer_agentic` fuerza la abstención
+   (`Coverage.NO_EVIDENCE`) e ignora por completo lo que el modelo escribió
+   — `test_memory_only_recall_never_becomes_evidence_and_still_abstains`
+   en `tests/test_strands_agent_memory.py`.
+2. **La memoria mentirosa: una afirmación relacional que viene de memoria
+   pasa por el MISMO anclaje al grafo** (`agent.postprocess.apply_guards` →
+   `validate_relational_claims`) que una alucinación del modelo — el guard
+   no sabe ni le importa de dónde salió la prosa. Sembrás en
+   `FakeMemoryStore` el hecho FALSO *"El equipo de Plataforma debe resolver
+   la dependencia de billing-2-0 con auth-cache"* (el mismo puente
+   inventado que ya alucina `--naive`, ver más arriba); el modelo lo
+   recuerda, lo repite en su respuesta, y `validate_relational_claims` lo
+   degrada igual que si lo hubiera inventado él solo — el grafo real solo
+   respalda `billing-2-0 DEPENDE_DE auth-cache` e `Identidad RESPONSABLE_DE
+   auth-cache`, nunca a Plataforma. Verificado con el texto final real de
+   la respuesta en
+   `test_relational_claim_sourced_from_memory_is_degraded_by_graph_anchoring`.
+
+### Activación — tres capas a la vez, nunca por default
+
+```bash
+# .env.example / .env — aplica a los DOS modos (local y aws)
+SECOND_BRAIN_MEMORY_ENABLED=false          # 1) el backend existe (FakeMemoryStore en local, AgentCore en aws)
+SECOND_BRAIN_AGENTCORE_MEMORY_ID=          # 2) solo en modo aws — específico de cuenta, nunca lo hardcodees
+SECOND_BRAIN_AGENTCORE_ACTOR_ID=demo-speaker
+```
+
+```bash
+# CLI — 3) actor_id/session_id explícitos PARA ESE TURNO, y --agentic
+python demo.py query --agentic --actor-id demo-speaker --session-id sesion-1 "..."
+```
+
+Sin `SECOND_BRAIN_MEMORY_ENABLED=true`, `stack.memory` es `None`. Sin
+`--actor-id` **y** `--session-id` en ese `query`/`chat` puntual,
+`recall_memory` ni se agrega a las tools del turno — el comportamiento es
+byte a byte el de antes de que existiera memoria (verificado en
+`test_memory_configured_but_without_session_id_behaves_like_memory_off` y
+su par de `actor_id`). Y sin `--agentic`, la memoria nunca se consulta ni
+se guarda: el pipeline fijo no la usa todavía.
+
+### Probar en LOCAL, sin AWS
+
+Con el venv activado y `ingest` ya corrido (ver el Quickstart):
+
+```bash
+export SECOND_BRAIN_MEMORY_ENABLED=true   # PowerShell: $env:SECOND_BRAIN_MEMORY_ENABLED = "true"
+
+python demo.py query --agentic --trace --actor-id demo-speaker --session-id sesion-charla \
+  --seed-hecho "El equipo de Plataforma debe resolver la dependencia de billing-2-0 con auth-cache." \
+  "¿Qué dependencia puede retrasar Billing 2.0, qué equipo debe resolverla y qué decisión técnica explica el riesgo?"
+```
+
+Esto es real y verificado: vas a ver `🧠 hecho sembrado (demo-speaker): ...`
+al arrancar y `💾 memoria → turno guardado (actor=demo-speaker,
+sesión=sesion-charla)` en la traza — la siembra y el guardado del turno
+corren siempre que la bandera esté activa, sin importar qué LLM responda.
+Lo que NO vas a ver contra el `ScriptedLlm` que maneja las 10 preguntas
+guionadas de la CLI (`demo.build_scripted_llm`/`build_agentic_scripted_llm`)
+es una línea `🧠 herramienta.recordar_memoria`: ese guion todavía no le
+enseña al LLM local a llamar `recall_memory` por su cuenta — un LLM
+guionado sigue un libreto fijo, no "decide" nada (queda pendiente en
+`openspec/changes/agregar-memoria-second-brain/tasks.md`, sección 8).
+
+El round-trip completo — recordar el hecho falso y verlo degradado por el
+grafo, con el texto final real de la respuesta — SÍ está verificado de
+punta a punta con un `ScriptedLlm` de test que sí llama `recall_memory`:
+
+```bash
+python -m pytest tests/test_strands_agent_memory.py -v
+```
+
+6 tests, todos en verde: activación de la tool según las tres capas,
+memoria-sola-nunca-evidencia, la degradación de la memoria mentirosa,
+memoria apagada por falta de `actor_id`/`session_id` (idéntico a antes de
+que existiera memoria), y `remember_turn` después del turno.
+`python -m pytest tests/test_memory_stores.py -v` (13 tests más) cubre los
+dos backends —`FakeMemoryStore` y `AgentCoreMemoryStore` contra un cliente
+`boto3` falso— por separado, sin tocar AWS real.
+
+Para la continuidad de sesión (STM) en un solo proceso —`FakeMemoryStore`
+vive en RAM, así que dos invocaciones sueltas de `query` nunca comparten
+memoria— usá `chat`, que mantiene un único `Stack` y una única sesión
+mientras dure el REPL:
+
+```bash
+python demo.py chat --agentic --trace --actor-id demo-speaker --session-id sesion-charla
+# en el REPL: :seed-hecho <texto>, :seed-preferencia <texto>, :salir
+```
+
+Verificado corriendo dos preguntas seguidas en el mismo `chat`: las dos
+imprimen `💾 memoria → turno guardado`, confirmando que el turno anterior
+quedó accesible para el siguiente dentro del mismo proceso.
+
+**Docker**: `docker-compose.yml` todavía no pasa `SECOND_BRAIN_MEMORY_ENABLED`
+a los servicios `demo`/`web` (su bloque `environment:` está fijo, sin
+interpolar variables de `.env`); hasta que eso se cablee, la forma de
+probar memoria en un contenedor puntual es `docker compose run --rm -e
+SECOND_BRAIN_MEMORY_ENABLED=true demo python demo.py query --agentic ...`
+(con `ingest` ya corrido en ese volumen) — y necesita una imagen
+reconstruida (`docker compose build demo`) si tu build es anterior a este
+cambio, porque `--actor-id`/`--session-id`/`--seed-hecho`/`--seed-preferencia`
+son opciones nuevas de la CLI.
+
+### Probar contra AWS real
+
+```bash
+# .env (ver "Pasar a AWS real" más abajo para el resto de las variables)
+SECOND_BRAIN_MODE=aws
+SECOND_BRAIN_MEMORY_ENABLED=true
+SECOND_BRAIN_AGENTCORE_MEMORY_ID=<id del recurso ya desplegado — infra/stacks/agentcore_stack.py>
+SECOND_BRAIN_AGENTCORE_ACTOR_ID=demo-speaker
+```
+
+```bash
+set -a && source .env && set +a   # la CLI no carga .env sola — ver la nota de "Pasar a AWS real"
+python demo.py chat --agentic --trace --actor-id demo-speaker --session-id sesion-charla
+```
+
+A diferencia del local, acá el LLM es un Bedrock real: decide POR SU CUENTA
+cuándo llamar `recall_memory` (guiado por `MEMORY_PROMPT_ADDENDUM` en el
+system prompt), así que cualquier pregunta con una referencia anafórica
+("¿y quién es el dueño?", después de preguntar por un servicio) puede
+disparar el recuerdo en vivo — no hace falta que sea una de las preguntas
+del guion, a diferencia del modo local con `ScriptedLlm`.
+
+**Consistencia eventual.** Un `remember_turn` (`CreateEvent`) exitoso NO
+garantiza que un `recall_memory` inmediatamente después —mismo turno, turno
+siguiente en la misma sesión, o la extracción a LTM de hechos/preferencias—
+ya lo vea: la escritura y la extracción son asíncronas del lado del
+servicio. El turno queda guardado igual; no asumas que es recuperable al
+instante. (`FakeMemoryStore` en modo local sí ve su propio escrito de
+inmediato, porque es RAM del mismo proceso — la inconsistencia es una
+propiedad del backend real, no algo que el puerto simule a propósito.)
 
 ## MCP ≠ A2A — el second brain como herramienta y como agente (el cierre de la charla)
 

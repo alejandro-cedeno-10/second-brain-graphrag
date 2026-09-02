@@ -36,6 +36,20 @@ directo en su primera respuesta, `AfterToolsEvent` no llega a dispararse
 `agent.strands_agent.answer_agentic` cierra ese hueco con una verificación
 posterior determinista (ver su docstring), para que ninguna respuesta
 salga sin evidencia real sin importar qué haga el modelo.
+
+MEMORIA (`recall_memory`, ver `agent.strands_tools`/`agent.memory`): el
+escenario de continuidad de sesión necesita que el modelo pueda llamar
+`recall_memory` SOLO, en su primer batch, antes de saber siquiera qué
+buscar — si este hook evaluara cobertura ahí (cero `Evidence`, porque
+`recall_memory` nunca llama a `collector.add(...)`) cortaría el turno con
+`Coverage.NO_EVIDENCE` antes de que el modelo llegara a `search_documents`.
+Por eso el hook DIFIERE su evaluación (no corta, pero tampoco evalúa)
+mientras `EvidenceCollector.evidence_tool_called` siga en `False` — ese
+flag solo lo prende `add()`, que solo llaman `search_documents`/
+`traverse_graph`, nunca `recall_memory`. La red de seguridad de
+`answer_agentic` sigue cubriendo el caso límite de un modelo que llamara
+SOLO `recall_memory` y redactara igual sin evidencia real: `collector.items`
+queda vacío, así que esa respuesta se fuerza a abstención lo mismo.
 """
 
 from __future__ import annotations
@@ -69,6 +83,17 @@ class CoverageGateHook(HookProvider):
         registry.add_callback(AfterToolsEvent, self._on_after_tools)
 
     def _on_after_tools(self, event: AfterToolsEvent) -> None:
+        if not self._collector.evidence_tool_called:
+            self._trace.append(
+                TraceStep(
+                    stage="gate.cobertura.diferido",
+                    detail=(
+                        "cobertura diferida: todavía no se llamó una tool de "
+                        "evidencia (solo recall_memory hasta ahora)"
+                    ),
+                )
+            )
+            return
         cobertura = evaluate_coverage(self._question, self._collector.items)
         self.last_coverage = cobertura
         self._trace.append(

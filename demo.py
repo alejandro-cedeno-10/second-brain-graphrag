@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import re
 import sys
@@ -568,6 +569,75 @@ def _build_cli_lexical_index() -> LexicalIndex:
     return build_lexical_index(chunks)
 
 
+def _invoke_responder(
+    responder: Callable[..., Answer],
+    question: str,
+    stack: Stack,
+    lexical_index: LexicalIndex,
+    *,
+    actor_id: str | None,
+    session_id: str | None,
+) -> Answer:
+    """Llama a `answer`/`answer_agentic` encadenando `actor_id`/`session_id`
+    SOLO si la firma ya los acepta.
+
+    `agent.strands_agent.answer_agentic` ya declara ambos parámetros
+    (keyword-only, default `None`, ver su docstring): a ese camino le llegan
+    siempre, incluso cuando son `None` — es lo que mantiene la memoria
+    inactiva en un turno sin `--actor-id`/`--session-id` explícitos, aunque
+    el backend esté configurado. `agent.orchestrator.answer` (camino fijo)
+    todavía NO los declara: es la única razón por la que este shim (vía
+    `inspect.signature`) sigue existiendo — sin él, invocar el camino fijo
+    con estos kwargs fallaría con un `TypeError`. En cuanto esa firma se
+    extienda, este shim empieza a encadenarlos de verdad ahí también, sin
+    tocar `demo.py` de nuevo.
+    """
+    parametros = inspect.signature(responder).parameters
+    extra: dict[str, str | None] = {}
+    if "actor_id" in parametros:
+        extra["actor_id"] = actor_id
+    if "session_id" in parametros:
+        extra["session_id"] = session_id
+    return responder(question, stack, lexical_index, **extra)
+
+
+def _seed_local_memory(
+    stack: Stack, actor_id: str, hechos: list[str], preferencias: list[str]
+) -> None:
+    """Siembra hechos/preferencias en `stack.memory` (p.ej. `FakeMemoryStore`
+    en modo local) antes de responder, para poder grabar en un solo proceso
+    los escenarios de memoria (preferencia/hecho falso) sin depender de la
+    extracción asíncrona real de AgentCore.
+
+    `seed_hecho`/`seed_preferencia` no son parte de `MemoryPort` (son solo
+    del adapter local, ver `second_brain.adapters.local.fake_memory_store.FakeMemoryStore`),
+    así que esta función es tolerante: sin memoria activa, o con un backend
+    que no las expone (AgentCore en modo aws), avisa por consola y no hace
+    nada — nunca rompe el turno.
+    """
+    if not (hechos or preferencias):
+        return
+    if stack.memory is None:
+        console.print(
+            "[yellow]⚠ --seed-hecho/--seed-preferencia sin efecto: memoria "
+            "desactivada (hace falta SECOND_BRAIN_MEMORY_ENABLED=true).[/]"
+        )
+        return
+    if not hasattr(stack.memory, "seed_hecho"):
+        console.print(
+            "[yellow]⚠ --seed-hecho/--seed-preferencia sin efecto: el backend "
+            "de memoria activo no soporta siembra manual (solo FakeMemoryStore "
+            "la expone, en modo local).[/]"
+        )
+        return
+    for texto in hechos:
+        stack.memory.seed_hecho(actor_id, texto)
+        console.print(f"[dim]🧠 hecho sembrado ({actor_id}):[/] {_escape_markup(texto)}")
+    for texto in preferencias:
+        stack.memory.seed_preferencia(actor_id, texto)
+        console.print(f"[dim]🧠 preferencia sembrada ({actor_id}):[/] {_escape_markup(texto)}")
+
+
 def _step(traza: list[TraceStep], stage: str) -> TraceStep | None:
     return next((p for p in traza if p.stage == stage), None)
 
@@ -660,6 +730,7 @@ def _print_trace(stack: Stack, answer: Answer) -> None:
     else:
         tipo_pregunta = "simple"
     console.print(f"🧠 orquestador → pregunta {tipo_pregunta} detectada")
+    _print_memory_trace(traza, _MEMORIA_LECTURA)
 
     resultados_busqueda = 0
     if paso_buscador and paso_buscador.metadata:
@@ -697,7 +768,32 @@ def _print_trace(stack: Stack, answer: Answer) -> None:
         )
         _print_relational_claims(traza)
 
+    _print_memory_trace(traza, _MEMORIA_ESCRITURA)
     console.print(f"📤 respuesta con {len(answer.citations)} citas")
+
+
+def _print_memory_trace(traza: list[TraceStep], etapas: tuple[tuple[str, str], ...]) -> None:
+    """Muestra las líneas de memoria del turno, en el orden en que ocurren.
+
+    La lectura va arriba de la traza y la escritura al final a propósito: la
+    traza de la demo se lee como una línea de tiempo, y un `💾 turno guardado`
+    impreso antes de la búsqueda haría creer que se guardó algo que todavía no
+    existía. Solo lee `TraceStep.detail`, sin asumir metadata específica.
+    """
+    for stage, icono in etapas:
+        paso = _step(traza, stage)
+        if paso:
+            console.print(f"{icono} memoria    → {paso.detail}")
+
+
+_MEMORIA_LECTURA = (
+    ("herramienta.recordar_memoria", "🧠"),
+    ("herramienta.recordar_memoria.error", "🧠"),
+)
+_MEMORIA_ESCRITURA = (
+    ("memoria.guardado", "💾"),
+    ("memoria.guardado.error", "💾"),
+)
 
 
 def _print_relational_claims(traza: list[TraceStep]) -> None:
@@ -766,6 +862,43 @@ def query(
             "no es un modo de producción."
         ),
     ),
+    actor_id: str | None = typer.Option(
+        None,
+        "--actor-id",
+        help=(
+            "Actor que 'recuerda' — la CLI NUNCA sintetiza un default acá: "
+            "sin esta bandera (y sin --session-id) la memoria queda inactiva "
+            "para este turno aunque SECOND_BRAIN_MEMORY_ENABLED esté en true."
+        ),
+    ),
+    session_id: str | None = typer.Option(
+        None,
+        "--session-id",
+        help=(
+            "Sesión a compartir entre invocaciones para encadenar preguntas "
+            "(p.ej. una referencia anafórica sobre la pregunta anterior) Y "
+            "activar memoria para este turno. Sin ella, cada `query` es una "
+            "sesión nueva Y la memoria queda inactiva — nunca se genera un "
+            "id al azar por su cuenta (tercera capa de activación, ver "
+            "`agent.strands_agent.answer_agentic`)."
+        ),
+    ),
+    seed_hecho: list[str] | None = typer.Option(  # noqa: B008 - patrón típico de typer para opciones repetibles
+        None,
+        "--seed-hecho",
+        help=(
+            "Siembra un 'hecho' en memoria local antes de responder "
+            "(repetible; requiere modo local con memoria activa)."
+        ),
+    ),
+    seed_preferencia: list[str] | None = typer.Option(  # noqa: B008 - idem --seed-hecho
+        None,
+        "--seed-preferencia",
+        help=(
+            "Siembra una preferencia de usuario en memoria local antes de "
+            "responder (repetible; ídem --seed-hecho)."
+        ),
+    ),
 ) -> None:
     """Responde `question` contra el stack ya ingestado (correr `ingest` antes).
 
@@ -783,6 +916,23 @@ def query(
     causal) y el después (`agent.guards.validate_relational_claims`
     degradándolo) — es un guion de demostración, no un modo de producción,
     y sin la bandera el comportamiento es idéntico al de siempre.
+
+    `--actor-id`/`--session-id` identifican quién pregunta y qué conversación
+    es, para memoria (ver `openspec/changes/agregar-memoria-second-brain/`):
+    se encadenan tal cual hacia `answer`/`answer_agentic` (ver
+    `_invoke_responder`) — SIN sintetizar ningún default truthy cuando
+    faltan. Es la tercera capa de activación de memoria (ver el docstring
+    de `agent.strands_agent.answer_agentic`): con cualquiera de las dos
+    ausente, el turno se comporta exactamente como si memoria no existiera,
+    aunque el backend esté configurado (`SECOND_BRAIN_MEMORY_ENABLED=true` +
+    id de AgentCore) — ninguna llamada a AWS por memoria depende solo de esa
+    configuración de servidor. `--seed-hecho`/`--seed-preferencia` siembran
+    memoria local antes de responder, en el MISMO proceso (necesario:
+    `FakeMemoryStore` vive solo en RAM, no persiste entre invocaciones de
+    `query` — para encadenar varios turnos de verdad, usar el comando
+    `chat`); la siembra en sí no depende de `--actor-id`/`--session-id`
+    (nunca toca AWS), pero solo tiene efecto OBSERVABLE en este turno si
+    además se pasan ambas banderas para activar memoria.
     """
     settings = _resolve_settings()
     if naive and settings.mode != "local":
@@ -791,10 +941,20 @@ def query(
             "no tiene efecto en modo 'aws' (ahí responde el LLM real).[/]"
         )
     stack = _build_cli_stack(settings, agentic=agentic, naive=naive)
+    _seed_local_memory(
+        stack, actor_id or settings.agentcore_actor_id, seed_hecho or [], seed_preferencia or []
+    )
     indice = _build_cli_lexical_index()
 
     responder = answer_agentic if agentic else answer
-    respuesta = responder(question, stack, indice)
+    respuesta = _invoke_responder(
+        responder,
+        question,
+        stack,
+        indice,
+        actor_id=actor_id,
+        session_id=session_id,
+    )
 
     if naive and settings.mode == "local":
         console.print(
@@ -805,6 +965,102 @@ def query(
     if trace:
         _print_trace(stack, respuesta)
     _print_answer(respuesta)
+
+
+_CHAT_META_COMMANDS = (":salir", ":exit", ":quit")
+_CHAT_SEED_HECHO_PREFIX = ":seed-hecho "
+_CHAT_SEED_PREFERENCIA_PREFIX = ":seed-preferencia "
+
+
+@app.command()
+def chat(
+    agentic: bool = typer.Option(
+        False, "--agentic", help="Usar el loop agéntico en vez del pipeline fijo."
+    ),
+    naive: bool = typer.Option(False, "--naive", help="Ver `query --naive`; mismo guion acá."),
+    actor_id: str | None = typer.Option(
+        None,
+        "--actor-id",
+        help=(
+            "Actor que 'recuerda'. Sin esta bandera (y sin --session-id) la "
+            "memoria queda inactiva para TODO el chat, aunque "
+            "SECOND_BRAIN_MEMORY_ENABLED esté en true — la CLI nunca "
+            "sintetiza un default acá."
+        ),
+    ),
+    session_id: str | None = typer.Option(
+        None,
+        "--session-id",
+        help=(
+            "Sesión a usar para todo el chat, y la que activa memoria "
+            "(junto con --actor-id). Sin ella, nunca se genera un id al "
+            "azar por su cuenta: la memoria queda inactiva para toda la "
+            "corrida (tercera capa de activación, ver "
+            "`agent.strands_agent.answer_agentic`)."
+        ),
+    ),
+    trace: bool = typer.Option(False, "--trace", help="Mostrar el trace de cada turno."),
+) -> None:
+    """REPL de un solo proceso: un único `Stack` y una única sesión para
+    todas las preguntas de la corrida.
+
+    Existe específicamente para grabar en vivo los escenarios de memoria de
+    sesión (STM): `FakeMemoryStore` (ver
+    `openspec/changes/agregar-memoria-second-brain/design.md`, Decisión 10)
+    vive solo en RAM del `Stack` en curso, así que dos invocaciones
+    separadas de `query` nunca comparten memoria — acá sí, porque el `Stack`
+    y la sesión se arman una sola vez y sobreviven mientras dure el chat.
+    Igual que en `query`, memoria queda inactiva salvo que se pasen
+    `--actor-id` Y `--session-id` explícitos al arrancar el chat: sin
+    ambos, la corrida entera se comporta exactamente como si memoria no
+    existiera, sin importar la configuración del servidor.
+
+    Comandos especiales (no son preguntas): `:seed-hecho <texto>`,
+    `:seed-preferencia <texto>` (siembran memoria local, ver
+    `_seed_local_memory`; no dependen de `--actor-id`/`--session-id` porque
+    nunca tocan AWS, pero solo tienen efecto observable si además memoria
+    está activa) y `:salir` (o Ctrl+D/Ctrl+C) para terminar.
+    """
+    settings = _resolve_settings()
+    stack = _build_cli_stack(settings, agentic=agentic, naive=naive)
+    indice = _build_cli_lexical_index()
+    responder = answer_agentic if agentic else answer
+    actor_para_siembra = actor_id or settings.agentcore_actor_id
+    memoria_activa = bool(actor_id) and bool(session_id)
+
+    etiqueta_actor = actor_id if memoria_activa else f"{actor_para_siembra} (memoria inactiva)"
+    etiqueta_sesion = session_id if memoria_activa else "sin sesión (memoria inactiva)"
+    console.print(
+        f"[cyan]Second brain — chat[/] (actor=[bold]{_escape_markup(etiqueta_actor)}[/], "
+        f"sesión=[bold]{_escape_markup(etiqueta_sesion)}[/]). "
+        ":seed-hecho / :seed-preferencia / :salir disponibles.\n"
+    )
+    while True:
+        try:
+            entrada = console.input("[bold]› [/]").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            break
+        if not entrada:
+            continue
+        if entrada in _CHAT_META_COMMANDS:
+            break
+        if entrada.startswith(_CHAT_SEED_HECHO_PREFIX):
+            _seed_local_memory(
+                stack, actor_para_siembra, [entrada[len(_CHAT_SEED_HECHO_PREFIX) :]], []
+            )
+            continue
+        if entrada.startswith(_CHAT_SEED_PREFERENCIA_PREFIX):
+            _seed_local_memory(
+                stack, actor_para_siembra, [], [entrada[len(_CHAT_SEED_PREFERENCIA_PREFIX) :]]
+            )
+            continue
+        respuesta = _invoke_responder(
+            responder, entrada, stack, indice, actor_id=actor_id, session_id=session_id
+        )
+        if trace:
+            _print_trace(stack, respuesta)
+        _print_answer(respuesta)
 
 
 @app.command("graph-top")
