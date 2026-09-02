@@ -240,15 +240,36 @@ Los 5 sub-ítems de abajo quedan intactos para la fase que retome esto.
       `answer`/`answer_agentic` (vía `_invoke_responder`), `_print_trace`,
       `_print_answer`. Comandos especiales `:seed-hecho`/
       `:seed-preferencia`/`:salir`.
-- [ ] 8.3 Preguntas guionadas nuevas (`P_MEMORIA_STM`/`_PREFERENCIA`/
-      `_HECHO_FALSO`) — NO agregadas. `demo.py` no tiene ningún escenario
-      de memoria en su guion (verificado por grep de `P_MEMORIA`); las 10
-      preguntas existentes siguen sin cambios.
-- [ ] 8.4 Síntesis correspondientes en `build_scripted_llm`/
-      `build_agentic_scripted_llm` — NO agregadas (depende de 8.3). El
-      `ScriptedLlm` de la CLI hoy nunca decide llamar `recall_memory` por
-      su cuenta para ninguna de las 10 preguntas del guion — ver "Probar
-      en LOCAL, sin AWS" en `../../README.md`.
+- [x] 8.3 Preguntas guionadas nuevas — agregadas con otros nombres que los
+      previstos por el plan (`P_MEMORIA_STM`/`_PREFERENCIA`/`_HECHO_FALSO`):
+      `P_M1_SEGUIMIENTO` (seguimiento anafórico de P2 dentro de la misma
+      sesión de `chat`, sin nombrar `core-billing`), `SEMILLA_M2_PREFERENCIA`
+      (texto a sembrar con `--seed-preferencia`, reutiliza `P_BILLING` como
+      pregunta) y `SEMILLA_M3_HECHO_FALSO` (texto a sembrar con
+      `--seed-hecho`, también sobre `P_BILLING`, reutiliza
+      `TEXTO_P_BILLING_INGENUO` ya existente como respuesta degradada). Las
+      10 preguntas originales no cambiaron una línea de su lógica. Ver
+      `GUION_ACTO4_MEMORIA.md` y `tests/test_demo_memory_scenes.py`.
+- [x] 8.4 Síntesis correspondientes en `build_agentic_scripted_llm` —
+      agregadas vía `_memory_scenario_rules`/`_m1_seguimiento_rules` (no en
+      `build_scripted_llm`: las escenas de memoria son solo del camino
+      agéntico, igual que el resto de memoria). Interceptan `P_BILLING`
+      (`_decide_billing_con_memoria` decide `recall_memory` +
+      `search_documents` + `traverse_graph` en un mismo batch; la fase de
+      redacción lee el contenido de la pista para elegir entre preferencia/
+      hecho falso/síntesis honesta) y arman una máquina de 3 fases para
+      `P_M1_SEGUIMIENTO` (decidir `recall_memory` sola, decidir
+      `search_documents` solo si la STM recuperada de verdad menciona
+      `core-billing`, redactar). Todo esto SOLO cuando
+      `build_agentic_scripted_llm` determina que memoria está REALMENTE
+      activa para el turno (`stack.memory is not None` + `actor_id`/
+      `session_id` explícitos, la misma cuenta de tres capas que
+      `answer_agentic`) — sin ellas, cero reglas nuevas y `recall_memory`
+      ni existe como tool. El `ScriptedLlm` de la CLI hoy SÍ decide llamar
+      `recall_memory` por su cuenta para estas dos preguntas — ver "Probar
+      en LOCAL, sin AWS" en `../../README.md` (comandos y trazas reales) y
+      `tests/test_demo_memory_scenes.py` (7 tests, comportamiento
+      observable de traza + texto + citas).
 - [x] 8.5 Línea de traza de memoria — *implementada como
       `demo.py::_print_memory_trace` con iconos `🧠`
       (`herramienta.recordar_memoria`/`.error`) y `💾`
@@ -262,15 +283,21 @@ Los 5 sub-ítems de abajo quedan intactos para la fase que retome esto.
       responder ya los acepta), no un pase directo incondicional: sigue
       siendo necesario mientras el camino fijo no los declare (ver
       sección 6).*
-- [ ] 8.7 Verificación multi-turno en `check()` para `P_MEMORIA_STM` — NO
-      agregada (depende de 8.3). `check()` sigue siendo únicamente los 10
-      casos de un turno, en los dos caminos.
+- [ ] 8.7 Verificación multi-turno en `check()` para las escenas de
+      memoria — NO agregada. 8.3/8.4 sí están implementadas (ver arriba),
+      así que esto ya no depende de ellas — lo que falta es específicamente
+      sumar un caso de memoria DENTRO de `check()`: sigue siendo
+      únicamente los 10 casos de un turno, en los dos caminos. La
+      verificación multi-turno equivalente (M1/M2/M3, comportamiento
+      observable) sí existe, pero como pytest —
+      `tests/test_demo_memory_scenes.py` — no como parte de `check()`.
 - [ ] 8.8 `tests/test_demo_script.py`: cubrir `--actor-id`/`--session-id`/
-      `--seed-hecho`/`--seed-preferencia`/`chat` — NO agregado (verificado
-      por grep: cero tests nuevos ahí). `check()` reportando 20/20 sin
-      regresión SÍ se verificó a mano (ver sección 11), pero no quedó
-      como test explícito de que los escenarios de memoria no lo tocan
-      (tampoco existen esos escenarios, ver 8.3).
+      `--seed-hecho`/`--seed-preferencia`/`chat` — NO agregado ahí
+      (verificado por grep: cero tests nuevos en ese archivo puntual). Los
+      escenarios de memoria SÍ existen y SÍ están cubiertos (8.3/8.4), pero
+      en su propio archivo, `tests/test_demo_memory_scenes.py`, no dentro
+      de `test_demo_script.py`. `check()` reportando 20/20 sin regresión
+      SÍ se verificó a mano (ver sección 11).
 
 ## 9. Web (`web/api.py`) — opcional, no bloqueante para `check`/`pytest` — NO INICIADO
 
@@ -299,8 +326,11 @@ como antes de este change. Los 3 sub-ítems quedan intactos.
       como decía el ítem, porque aplica a los DOS modos (local y aws).*
 - [ ] 10.2 `corpus/README.md`: entradas para los escenarios de memoria en
       la tabla de contrato — NO agregadas (verificado: cero menciones de
-      "memoria" en `corpus/README.md`); depende de que existan las
-      preguntas guionadas de la tarea 8.3.
+      "memoria" en `corpus/README.md`). Ya no depende de la tarea 8.3 (las
+      preguntas guionadas de memoria existen — `P_M1_SEGUIMIENTO`,
+      `SEMILLA_M2_PREFERENCIA`, `SEMILLA_M3_HECHO_FALSO`, ver 8.3/8.4); el
+      contrato de M1/M2/M3 quedó documentado en `GUION_ACTO4_MEMORIA.md`
+      en su lugar, no en `corpus/README.md`.
 - [x] 10.3 (agregado en esta pasada, no estaba en el plan original)
       `../../README.md`: sección "Memoria del agente" — las tres capas,
       la regla "memoria es pista, nunca evidencia" con el ejemplo real de
@@ -317,12 +347,18 @@ como antes de este change. Los 3 sub-ítems quedan intactos.
       base + 19 nuevos: 13 en `tests/test_memory_stores.py`, 6 en
       `tests/test_strands_agent_memory.py`), 0 rojos. Re-verificado en esta
       pasada de documentación (no solo confiado en el reporte de otro
-      workstream).
-- [ ] 11.2 `demo.py check` sigue en 20/20 sin regresión (no re-ejecutado en
-      esta pasada, pero nada de lo tocado por los workstreams de memoria
-      afecta las 10 preguntas existentes) — el "nuevo caso multi-turno de
-      memoria en verde" de este ítem no existe porque 8.3/8.7 no se
-      implementaron.
+      workstream). *Actualizado en la pasada que implementó 8.3/8.4:
+      `tests/test_demo_memory_scenes.py` (7 tests nuevos) sube el total a
+      **146 passed** (139 + 7), 0 rojos — re-verificado corriendo
+      `pytest -q` completo en esta pasada de documentación.*
+- [ ] 11.2 `demo.py check` sigue en 20/20 sin regresión — re-ejecutado en
+      esta pasada de documentación (`20/20 verificaciones OK`, confirmado
+      real, ya no "no re-ejecutado"). El "nuevo caso multi-turno de memoria
+      en verde" de este ítem sigue sin existir DENTRO de `check()`: 8.3/8.4
+      sí se implementaron (ver arriba), pero 8.7 (agregarle ese caso a
+      `check()`) no — la verificación multi-turno equivalente vive como
+      pytest en `tests/test_demo_memory_scenes.py` en su lugar, no dentro
+      del smoke test de la CLI.
 - [x] 11.3 Verificado en esta pasada:
       `SECOND_BRAIN_AGENTCORE_MEMORY_ID=` sigue vacío en `.env.example`;
       el `.env` local (con un id de cuenta real en otra variable, no de

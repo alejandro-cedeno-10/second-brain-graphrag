@@ -348,32 +348,116 @@ byte a byte el de antes de que existiera memoria (verificado en
 su par de `actor_id`). Y sin `--agentic`, la memoria nunca se consulta ni
 se guarda: el pipeline fijo no la usa todavía.
 
-### Probar en LOCAL, sin AWS
+### Probar en LOCAL, sin AWS — las 3 escenas son deterministas
 
-Con el venv activado y `ingest` ya corrido (ver el Quickstart):
+Con el venv activado y `ingest` ya corrido (ver el Quickstart): las tres
+escenas de memoria del guion de charla (Acto 4, ver
+[`../GUION_ACTO4_MEMORIA.md`](../GUION_ACTO4_MEMORIA.md)) se graban HOY
+100% en local, sin AWS. `demo.build_agentic_scripted_llm` decide llamar
+`recall_memory` por su cuenta para `P_BILLING` (`_decide_billing_con_memoria`)
+y para el seguimiento anafórico de `chat` (`P_M1_SEGUIMIENTO`, `_m1_seguimiento_rules`)
+— pero SOLO cuando memoria está REALMENTE activa para el turno (las tres
+capas de "Activación" de arriba); sin ellas, ni una regla nueva se agrega y
+el guion de las 10 preguntas queda byte a byte el de siempre. Comandos y
+trazas reales, ejecutados contra este repo:
+
+**M1 — seguimiento anafórico (STM, dentro de la misma sesión de `chat`):**
 
 ```bash
 export SECOND_BRAIN_MEMORY_ENABLED=true   # PowerShell: $env:SECOND_BRAIN_MEMORY_ENABLED = "true"
+python demo.py chat --agentic --trace --actor-id demo-speaker-m1 --session-id m1-take1
+› Si modifico la API de core-billing, ¿qué módulos se rompen?
+› ¿y quién es el dueño?
+› :salir
+```
 
-python demo.py query --agentic --trace --actor-id demo-speaker --session-id sesion-charla \
-  --seed-hecho "El equipo de Plataforma debe resolver la dependencia de billing-2-0 con auth-cache." \
+Traza real del turno 2 (recortada):
+
+```
+🧠 orquestador → pregunta simple detectada
+🧠 memoria    → 1 recuerdo (STM sesión=1, LTM hechos=0, LTM preferencias=0)
+🔍 buscador   → híbrida + RRF + rerank → 12 statements
+🚪 gate       → SUFICIENTE
+🔗 anclaje    → ✅ respaldada — Plataforma RESPONSABLE_DE core-billing
+💾 memoria    → turno guardado (actor=demo-speaker-m1, sesión=m1-take1)
+```
+
+Respuesta real del turno 2: "El equipo de Plataforma es responsable de
+`core-billing` [source:servicios/core-billing.md]." — la cita sigue
+saliendo del documento, nunca de memoria, aunque el turno 2 no nombró
+`core-billing`.
+
+**M2 — la preferencia cambia forma, nunca los hechos:**
+
+```bash
+python demo.py query --agentic --trace \
+  --seed-preferencia "Para mis consultas de riesgo técnico como esta, preferís ir directo al impacto operativo: seguí citando los documentos, pero no desarrolles el contenido de los ADRs ni postmortems que cites." \
+  --actor-id demo-speaker-m2 --session-id m2-take1 \
   "¿Qué dependencia puede retrasar Billing 2.0, qué equipo debe resolverla y qué decisión técnica explica el riesgo?"
 ```
 
-Esto es real y verificado: vas a ver `🧠 hecho sembrado (demo-speaker): ...`
-al arrancar y `💾 memoria → turno guardado (actor=demo-speaker,
-sesión=sesion-charla)` en la traza — la siembra y el guardado del turno
-corren siempre que la bandera esté activa, sin importar qué LLM responda.
-Lo que NO vas a ver contra el `ScriptedLlm` que maneja las 10 preguntas
-guionadas de la CLI (`demo.build_scripted_llm`/`build_agentic_scripted_llm`)
-es una línea `🧠 herramienta.recordar_memoria`: ese guion todavía no le
-enseña al LLM local a llamar `recall_memory` por su cuenta — un LLM
-guionado sigue un libreto fijo, no "decide" nada (queda pendiente en
-`openspec/changes/agregar-memoria-second-brain/tasks.md`, sección 8).
+Traza real:
 
-El round-trip completo — recordar el hecho falso y verlo degradado por el
-grafo, con el texto final real de la respuesta — SÍ está verificado de
-punta a punta con un `ScriptedLlm` de test que sí llama `recall_memory`:
+```
+🧠 memoria    → 1 recuerdo (STM sesión=0, LTM hechos=0, LTM preferencias=1)
+🚪 gate       → SUFICIENTE
+🔗 anclaje    → ✅ respaldada — billing-2-0 DEPENDE_DE auth-cache
+             ✅ respaldada — Identidad RESPONSABLE_DE auth-cache
+📤 respuesta con 4 citas
+```
+
+Respuesta real: "`billing-2-0` depende de `auth-cache`
+[source:producto/billing-2-0.md]; el equipo de Identidad es responsable de
+resolverlo [source:servicios/auth-cache.md]. ADR-017
+[source:arquitectura/decisiones.md] e INC-042
+[source:incidentes/postmortem-inc-042-auth-cache.md] no alcanzan para
+atribuirles la causa del retraso." — mismos 4 documentos y mismo
+`Coverage` que sin preferencia sembrada, solo cambia el largo/tecnicismo
+del texto (verificado comparando longitudes y sets de citas en
+`tests/test_demo_memory_scenes.py::test_m2_preferencia_cambia_el_formato_no_los_hechos_ni_las_citas`).
+
+**M3 — la memoria mentirosa, degradada por el mismo anclaje al grafo:**
+
+```bash
+python demo.py query --agentic --trace \
+  --seed-hecho "El equipo de Plataforma es responsable de resolver la dependencia de auth-cache en Billing 2.0." \
+  --actor-id demo-speaker-m3 --session-id m3-take1 \
+  "¿Qué dependencia puede retrasar Billing 2.0, qué equipo debe resolverla y qué decisión técnica explica el riesgo?"
+```
+
+Traza real:
+
+```
+🧠 memoria    → 1 recuerdo (STM sesión=0, LTM hechos=1, LTM preferencias=0)
+🚪 gate       → SUFICIENTE
+🛡️ guards     → 2 citas recortadas · 0 URLs defanged
+🔗 anclaje    → ✅ respaldada — billing-2-0 DEPENDE_DE auth-cache
+             ⛔ degradada (sin evidencia) — Plataforma RESPONSABLE_DE billing-2-0
+             ⛔ degradada (sin evidencia) — ADR-017 CAUSA billing-2-0
+📤 respuesta con 1 citas
+```
+
+Respuesta: `Billing 2.0 podría retrasarse por la dependencia con auth-cache
+[source:producto/billing-2-0.md]. [sin evidencia suficiente para afirmar
+que Plataforma es responsable de billing-2-0] [sin evidencia suficiente
+para afirmar que ADR-017 es la causa de billing-2-0]` — sin cita a `memoria`
+en la tabla de citas: el hecho falso se recuperó igual que uno verdadero,
+pero el mismo `validate_relational_claims` que degrada una alucinación del
+modelo lo degrada acá, sin importarle de dónde salió.
+
+Las tres escenas —incluido que sin `actor_id`/`session_id` explícitos, o
+sin `stack.memory` configurado, las tres quedan inertes byte a byte— están
+cubiertas con comportamiento observable (traza + texto + citas) en:
+
+```bash
+python -m pytest tests/test_demo_memory_scenes.py -v
+```
+
+7 tests, todos en verde, ejercitando `demo.build_agentic_scripted_llm` real
+(no un `ScriptedLlm` armado a mano para el test).
+
+El CABLEADO de memoria en sí (independiente del guion de la CLI) tiene su
+propia suite, con un `ScriptedLlm` de test más granular:
 
 ```bash
 python -m pytest tests/test_strands_agent_memory.py -v
@@ -389,17 +473,8 @@ dos backends —`FakeMemoryStore` y `AgentCoreMemoryStore` contra un cliente
 
 Para la continuidad de sesión (STM) en un solo proceso —`FakeMemoryStore`
 vive en RAM, así que dos invocaciones sueltas de `query` nunca comparten
-memoria— usá `chat`, que mantiene un único `Stack` y una única sesión
-mientras dure el REPL:
-
-```bash
-python demo.py chat --agentic --trace --actor-id demo-speaker --session-id sesion-charla
-# en el REPL: :seed-hecho <texto>, :seed-preferencia <texto>, :salir
-```
-
-Verificado corriendo dos preguntas seguidas en el mismo `chat`: las dos
-imprimen `💾 memoria → turno guardado`, confirmando que el turno anterior
-quedó accesible para el siguiente dentro del mismo proceso.
+memoria— usá `chat` (como en M1), que mantiene un único `Stack` y una
+única sesión mientras dure el REPL.
 
 **Docker**: `docker-compose.yml` todavía no pasa `SECOND_BRAIN_MEMORY_ENABLED`
 a los servicios `demo`/`web` (su bloque `environment:` está fijo, sin
@@ -411,7 +486,12 @@ reconstruida (`docker compose build demo`) si tu build es anterior a este
 cambio, porque `--actor-id`/`--session-id`/`--seed-hecho`/`--seed-preferencia`
 son opciones nuevas de la CLI.
 
-### Probar contra AWS real
+### Variante: las mismas 3 escenas contra AWS real
+
+Las tres escenas de arriba ya son deterministas en local — esto es la
+VARIANTE con un modelo real, para mostrar que la decisión de llamar
+`recall_memory` no depende de un guion, y con el gotcha real que el modo
+local no tiene (consistencia eventual, ver abajo).
 
 ```bash
 # .env (ver "Pasar a AWS real" más abajo para el resto de las variables)
@@ -430,8 +510,15 @@ A diferencia del local, acá el LLM es un Bedrock real: decide POR SU CUENTA
 cuándo llamar `recall_memory` (guiado por `MEMORY_PROMPT_ADDENDUM` en el
 system prompt), así que cualquier pregunta con una referencia anafórica
 ("¿y quién es el dueño?", después de preguntar por un servicio) puede
-disparar el recuerdo en vivo — no hace falta que sea una de las preguntas
-del guion, a diferencia del modo local con `ScriptedLlm`.
+disparar el recuerdo en vivo — no hace falta que sea una de las tres
+escenas guionadas, a diferencia del modo local con `ScriptedLlm`. La
+contrapartida (ver el gotcha de abajo): sembrar un hecho/preferencia en LTM
+real depende de que Bedrock AgentCore lo EXTRAIGA de una conversación,
+asíncrono y sin API de "insertar ahora" — nada parecido a `--seed-hecho`,
+que en local escribe directo en `FakeMemoryStore`. El guion completo de
+grabación contra AWS (calentamiento, verificación de que la extracción ya
+prendió, un `actor_id` por escena) vive en
+[`../GUION_ACTO4_MEMORIA.md`](../GUION_ACTO4_MEMORIA.md).
 
 **Consistencia eventual.** Un `remember_turn` (`CreateEvent`) exitoso NO
 garantiza que un `recall_memory` inmediatamente después —mismo turno, turno
