@@ -733,6 +733,48 @@ Todos los adapters de AWS importan `boto3` de forma perezosa (recién en su
 primer método real, nunca en `__init__`): construir el `Stack` en modo `aws`
 sin credenciales configuradas no falla hasta el primer uso real.
 
+## Bedrock Knowledge Bases: el recuperador gestionado, al lado (opt-in)
+
+El repo despliega —bajo `-c enable_knowledge_base=true`— una **Bedrock
+Knowledge Base sobre el MISMO corpus**, en su propio índice de S3 Vectors.
+No reemplaza el pipeline propio: entra como **un ranking más** de la fusión
+RRF (`retrieval.retrieve`), junto al semántico y al léxico.
+
+```bash
+SECOND_BRAIN_KNOWLEDGE_BASE_ENABLED=true    # default: false
+SECOND_BRAIN_BEDROCK_KB_ID=...              # lo escribe `make aws-env`
+```
+
+Apagada —el default— `retrieve` funde solo semántico + léxico y el
+comportamiento es idéntico al de siempre. Sin las dos variables, la KB no se
+cablea y no hay una sola llamada de red.
+
+El `cdk deploy` crea la KB VACÍA: llenarla es un paso aparte, igual que
+`demo.py ingest` del lado propio.
+
+```bash
+python infra/ingestar-knowledge-base.py     # StartIngestionJob + espera
+```
+
+### Lo que se mide al prenderla (03-sep-2026, cuenta real)
+
+| | KB apagada | KB prendida |
+|---|---|---|
+| `HYBRID` de la KB | — | **rechazado**: sobre S3 Vectors solo hay SEMANTIC |
+| P2 (multi-hop) | 3 citas · grounding 0.84 | 3 citas · grounding 0.87–0.92 |
+| **P3 (abstención)** | `SIN_EVIDENCIA` ✅ | **`SUFICIENTE`** ❌ |
+
+La última fila es el punto. `load_corpus` excluye `README.md` a propósito; la
+KB indexa el prefijo completo del bucket y sí lo trae. Para "¿Cuál fue la
+facturación del Q4 2025?" ese README puntúa **0.82** (habla de servicios de
+facturación, sin un solo dato de Q4), supera el umbral del gate, y el sistema
+deja de abstenerse.
+
+Sumar un recuperador gestionado sobre el mismo corpus puede COSTAR la
+propiedad que esta demo defiende. Por eso la KB es opt-in, viene apagada, y
+el adapter NO filtra el README a mano: taparlo escondería la lección. El
+comportamiento queda fijado en `tests/test_knowledge_base.py`.
+
 ## Costos (referencia del plan de la charla)
 
 | Concepto | Costo |

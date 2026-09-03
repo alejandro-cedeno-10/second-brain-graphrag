@@ -58,6 +58,14 @@ EMBEDDINGS_DIM = 1024
 DISTANCE_METRIC = "cosine"
 
 KB_EMBEDDING_MODEL_ID = "cohere.embed-multilingual-v3"
+KB_RERANK_MODEL_ID = "cohere.rerank-v3-5:0"
+"""Sin `bedrock:Rerank` en el rol de la KB, pedirle `rerankingConfiguration`
+a `Retrieve` devuelve AccessDeniedException aunque la API sí lo soporte
+(verificado contra la cuenta real). `bedrock:Rerank` va con `Resource: "*"`
+a propósito: no admite scope por modelo — el scope se aplica sobre
+`bedrock:InvokeModel`, que sí acepta el ARN del reranker. Scopear el Rerank
+al ARN del modelo deniega igual, sin error de sintaxis que lo delate.
+"""
 KB_CHUNK_MAX_TOKENS = 512
 KB_CHUNK_OVERLAP_PERCENTAGE = 10
 
@@ -238,6 +246,28 @@ class StorageStack(Stack):
                         resource="bucket",
                         resource_name=f"{self.vector_bucket.vector_bucket_name}/index/"
                         f"{self.kb_vector_index.index_name}",
+                        arn_format=ArnFormat.SLASH_RESOURCE_NAME,
+                    )
+                ],
+            )
+        )
+        kb_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="RerankRetrievedResults",
+                actions=["bedrock:Rerank"],
+                resources=["*"],
+            )
+        )
+        kb_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="InvokeRerankModel",
+                actions=["bedrock:InvokeModel"],
+                resources=[
+                    self.format_arn(
+                        service="bedrock",
+                        account="",
+                        resource="foundation-model",
+                        resource_name=KB_RERANK_MODEL_ID,
                         arn_format=ArnFormat.SLASH_RESOURCE_NAME,
                     )
                 ],
