@@ -137,8 +137,8 @@ def test_la_kb_necesita_las_dos_condiciones_para_cablearse(
     assert (build_stack(settings).knowledge_base is not None) is espera_kb
 
 
-def test_la_kb_puede_romper_la_abstencion_metiendo_un_doc_que_el_corpus_excluye() -> None:
-    """Caracteriza el riesgo REAL de prender la KB, medido contra AWS el 03-sep-2026.
+def test_un_doc_fuera_del_contrato_del_corpus_le_cuesta_la_abstencion_al_gate() -> None:
+    """Fija POR QUE las dos ingestas tienen que cubrir el mismo conjunto de documentos.
 
     `ingestion.load_corpus` excluye `README.md` a propósito (es contrato de
     diseño para humanos, no contenido indexable). La KB indexa el prefijo
@@ -148,10 +148,11 @@ def test_la_kb_puede_romper_la_abstencion_metiendo_un_doc_que_el_corpus_excluye(
     mejor score es 0.35 y el gate marca SIN_EVIDENCIA; con la KB prendida ese
     0.82 pasa el umbral y el gate marca SUFICIENTE.
 
-    O sea: sumar un recuperador gestionado puede COSTAR la abstención, que es
-    la propiedad que la charla defiende. Por eso la KB es opt-in y viene
-    apagada, y por eso este test existe: si alguien la prende por default,
-    que falle acá y no en vivo.
+    Resuelto en la capa correcta: `infra/subir-corpus.py` no sube el README al
+    bucket del data source, así que la KB ya no lo indexa y P3 vuelve a
+    abstenerse con la KB PRENDIDA (verificado, 03-sep-2026). Este test se
+    queda como candado: fija que un documento fuera del contrato del corpus,
+    entre por donde entre, le cuesta la abstención al gate.
     """
     ruido = Evidence(
         doc_id="README.md",

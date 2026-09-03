@@ -324,6 +324,11 @@ class StorageStack(Stack):
                 s3_configuration=bedrock.CfnDataSource.S3DataSourceConfigurationProperty(
                     bucket_arn=self.corpus_bucket.bucket_arn,
                 ),
+                # Sin `inclusion_prefixes`: la propiedad acepta UN solo prefijo
+                # (verificado, el validador de CloudFormation rechaza 9) y el
+                # corpus tiene nueve categorias en la raiz. Que el `README.md`
+                # no llegue a este bucket lo garantiza `subir-corpus.py`, que
+                # aplica la misma exclusion que `ingestion.load_corpus`.
             ),
             vector_ingestion_configuration=bedrock.CfnDataSource.VectorIngestionConfigurationProperty(
                 chunking_configuration=bedrock.CfnDataSource.ChunkingConfigurationProperty(

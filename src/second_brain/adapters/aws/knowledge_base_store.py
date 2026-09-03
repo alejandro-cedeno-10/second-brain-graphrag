@@ -16,21 +16,23 @@ como UN ranking más y no como el recuperador único:
   gestionado exige OpenSearch Serverless. Por eso este adapter no lo pide:
   sobre S3 Vectors la KB es semántica pura, y el BM25 lo sigue poniendo
   `retrieval.search_lexical`.
-- La KB indexa TODO el prefijo del bucket, incluido el `README.md` que
-  `ingestion.load_corpus` excluye por ser contrato de diseño para humanos.
+- La KB indexa TODO lo que haya en el bucket del data source: no puede
+  excluir archivos (su `inclusionPrefixes` acepta UN solo prefijo, y el
+  corpus tiene nueve categorias en la raiz). Por eso la exclusion pasa ANTES,
+  al subir: `infra/subir-corpus.py` aplica la misma regla que
+  `ingestion.load_corpus` y deja el `README.md` fuera del bucket.
 
-RIESGO MEDIDO (03-sep-2026, contra la cuenta real): ese `README.md` le CUESTA
-la abstención al sistema. Para "¿Cuál fue la facturación del Q4 2025?" —la
-pregunta sin respuesta en el corpus— con la KB apagada el mejor score es 0.35
-y el gate marca SIN_EVIDENCIA; con la KB prendida el README puntúa 0.82,
-supera `gate.RELEVANT_SCORE_THRESHOLD` y el gate pasa a SUFICIENTE. El
-documento no contiene ni un dato de Q4: lo único que hace es hablar de
-servicios de facturación.
+  No es cosmetico. Medido contra la cuenta real el 03-sep-2026, con ese
+  README indexado la pregunta sin respuesta del corpus ("la facturacion del
+  Q4 2025") lo recuperaba con score 0.82, superaba
+  `gate.RELEVANT_SCORE_THRESHOLD` y el sistema DEJABA DE ABSTENERSE — la
+  propiedad que la demo defiende. Alineados los dos caminos de ingesta, el
+  gate vuelve a marcar SIN_EVIDENCIA con la KB prendida.
 
-Por eso la KB es OPT-IN y viene apagada, y este adapter NO filtra el README a
-mano: esconderlo taparía justamente la lección —sumar un recuperador
-gestionado sobre el mismo corpus puede costar la propiedad que la charla
-defiende—. Ver `tests/test_knowledge_base.py` para el test que lo fija.
+  La leccion que queda para la charla: sumar un recuperador gestionado sobre
+  "el mismo" corpus solo es honesto si de verdad es el mismo conjunto de
+  documentos. Dos ingestas con contratos distintos no se comparan: una le
+  puede costar a la otra su garantia mas fuerte.
 """
 
 from __future__ import annotations
