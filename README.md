@@ -749,31 +749,45 @@ Apagada —el default— `retrieve` funde solo semántico + léxico y el
 comportamiento es idéntico al de siempre. Sin las dos variables, la KB no se
 cablea y no hay una sola llamada de red.
 
-El `cdk deploy` crea la KB VACÍA: llenarla es un paso aparte, igual que
-`demo.py ingest` del lado propio.
+El `cdk deploy` crea la KB VACÍA y con el bucket de corpus vacío: llenarlos es
+un paso aparte, igual que `demo.py ingest` del lado propio.
 
 ```bash
-python infra/ingestar-knowledge-base.py     # StartIngestionJob + espera
+python infra/subir-corpus.py              # sube el corpus (excluye README.md)
+python infra/ingestar-knowledge-base.py   # StartIngestionJob + espera
 ```
 
-### Lo que se mide al prenderla (03-sep-2026, cuenta real)
+### Las dos ingestas tienen que cubrir el MISMO conjunto de documentos
 
-| | KB apagada | KB prendida |
-|---|---|---|
-| `HYBRID` de la KB | — | **rechazado**: sobre S3 Vectors solo hay SEMANTIC |
-| P2 (multi-hop) | 3 citas · grounding 0.84 | 3 citas · grounding 0.87–0.92 |
-| **P3 (abstención)** | `SIN_EVIDENCIA` ✅ | **`SUFICIENTE`** ❌ |
+`ingestion.load_corpus` excluye `corpus/README.md` (es contrato de diseño para
+humanos, no contenido indexable). El data source de la KB **no puede excluir
+archivos** —su `inclusionPrefixes` acepta un solo prefijo y el corpus tiene
+nueve categorías en la raíz— así que la exclusión pasa antes, al subir:
+`subir-corpus.py` aplica la misma regla y deja el README fuera del bucket.
 
-La última fila es el punto. `load_corpus` excluye `README.md` a propósito; la
-KB indexa el prefijo completo del bucket y sí lo trae. Para "¿Cuál fue la
-facturación del Q4 2025?" ese README puntúa **0.82** (habla de servicios de
-facturación, sin un solo dato de Q4), supera el umbral del gate, y el sistema
-deja de abstenerse.
+No es cosmético. Medido contra la cuenta real (03-sep-2026), con el README
+indexado por la KB:
 
-Sumar un recuperador gestionado sobre el mismo corpus puede COSTAR la
-propiedad que esta demo defiende. Por eso la KB es opt-in, viene apagada, y
-el adapter NO filtra el README a mano: taparlo escondería la lección. El
-comportamiento queda fijado en `tests/test_knowledge_base.py`.
+| | KB apagada | KB prendida, README indexado | KB prendida, corpus alineado |
+|---|---|---|---|
+| P3 — "¿facturación del Q4 2025?" | `SIN_EVIDENCIA` ✅ | **`SUFICIENTE`** ❌ | `SIN_EVIDENCIA` ✅ |
+| `demo.py check` (AWS, Nova Pro) | 9–10/20 | 6/20 | **9/20** |
+
+Ese README puntúa **0.82** para una pregunta de facturación —habla de servicios
+de facturación, sin un solo dato de Q4—, supera el umbral del coverage gate y
+el sistema deja de abstenerse. Alineados los dos caminos, la paridad vuelve.
+
+**La lección para la charla:** sumar un recuperador gestionado sobre "el mismo"
+corpus solo es honesto si de verdad es el mismo conjunto de documentos. Dos
+ingestas con contratos distintos no se comparan — una le puede costar a la otra
+su garantía más fuerte. Queda fijado en `tests/test_knowledge_base.py`.
+
+### Sobre `HYBRID`
+
+Sobre S3 Vectors la KB **solo hace búsqueda semántica**: pedirle
+`overrideSearchType=HYBRID` devuelve `ValidationException`. El híbrido
+gestionado exige OpenSearch Serverless. Por eso la KB SUMA un ranking en vez de
+reemplazar el pipeline: sustituirlo perdería el BM25.
 
 ## Costos (referencia del plan de la charla)
 
