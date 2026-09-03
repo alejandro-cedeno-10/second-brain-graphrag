@@ -15,6 +15,7 @@ charla: ver su docstring para el porqué de nunca desambiguar a la fuerza.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 import unicodedata
@@ -25,6 +26,8 @@ from pathlib import Path
 from second_brain.adapters.local.tokenization import tokenize
 from second_brain.config import Stack
 from second_brain.ports import Chunk, Hit, ScoredDoc
+
+logger = logging.getLogger(__name__)
 
 _BM25_K1 = 1.5
 _BM25_B = 0.75
@@ -144,16 +147,31 @@ def retrieve(
     top_n_final: int = 5,
     rrf_k: int = 60,
 ) -> list[ScoredDoc]:
-    """Pipeline híbrido completo: semántico + léxico → RRF → rerank.
+    """Pipeline híbrido completo: semántico + léxico (+ KB) → RRF → rerank.
 
     Devuelve evidencia con su provenance intacto (`chunk_id` y `metadata`,
     con `doc_id`/`titulo_seccion`/`offset` heredados del chunk) para que
     quien consuma el resultado pueda citar la fuente exacta, no solo un
     texto suelto.
+
+    Con `stack.knowledge_base` cableado (opt-in, ver `config.build_stack`) la
+    Bedrock Knowledge Base entra como UN RANKING MÁS de la fusión, nunca
+    reemplazando a los otros dos: sobre S3 Vectors la KB solo hace semántica
+    (su `HYBRID` está rechazado por el servicio), así que sustituir el
+    pipeline por ella perdería el BM25. Sumarla, en cambio, aporta su propio
+    chunking sobre el mismo corpus, y RRF los concilia por puesto sin que
+    ninguna de las tres escalas de score tenga que ser comparable.
+
+    Apagada —el default— esta función se comporta exactamente igual que
+    antes: la lista de rankings vuelve a ser semántico + léxico.
     """
     ranking_semantico = search_semantic(question, stack, top_k_per_method)
     ranking_lexico = search_lexical(question, lexical_index, top_k_per_method)
-    fusionados = fuse_rrf([ranking_semantico, ranking_lexico], k=rrf_k)
+    rankings = [ranking_semantico, ranking_lexico]
+    ranking_kb = _search_knowledge_base_fail_open(question, stack, top_k_per_method)
+    if ranking_kb:
+        rankings.append(ranking_kb)
+    fusionados = fuse_rrf(rankings, k=rrf_k)
     candidatos = fusionados[: max(top_k_per_method, top_n_final)]
     if not candidatos:
         return []
@@ -167,6 +185,25 @@ def retrieve(
             resultado.chunk_id = original.chunk_id
             resultado.metadata = original.metadata
     return resultados
+
+
+def _search_knowledge_base_fail_open(
+    question: str, stack: Stack, top_k: int
+) -> list[Hit]:
+    """Consulta la KB gestionada si está cableada; nunca propaga su error.
+
+    Fail-open igual que el traversal de grafo en `agent.orchestrator`: la KB
+    es un recuperador ADICIONAL, así que un 403, un throttle o una KB borrada
+    tienen que degradar la búsqueda a semántico + léxico en vez de tumbar la
+    pregunta en plena demo en vivo.
+    """
+    if stack.knowledge_base is None:
+        return []
+    try:
+        return stack.knowledge_base.retrieve(question, top_k)
+    except Exception:
+        logger.warning("Knowledge Base no disponible: sigo con semántico + léxico", exc_info=True)
+        return []
 
 
 def resolve_targets(mention: str, stack: Stack, cap: int = _TARGETS_CAP_DEFAULT) -> list[str]:

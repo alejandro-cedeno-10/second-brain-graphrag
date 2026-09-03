@@ -13,7 +13,14 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from second_brain.ports import EmbeddingsPort, GraphStorePort, LlmPort, RerankPort, VectorStorePort
+from second_brain.ports import (
+    EmbeddingsPort,
+    GraphStorePort,
+    KnowledgeBasePort,
+    LlmPort,
+    RerankPort,
+    VectorStorePort,
+)
 
 if TYPE_CHECKING:
     # `MemoryPort` es del change `agregar-memoria-second-brain` (ver
@@ -98,6 +105,11 @@ class Settings:
     # es específico de la cuenta: SIEMPRE vacío en `.env.example`, nunca
     # hardcodeado ni commiteado con un valor real.
     memory_enabled: bool = False
+
+    # La KB gestionada es OPT-IN y suma un ranking al híbrido; apagada, el
+    # pipeline queda idéntico al de siempre (ver `retrieval.retrieve`).
+    knowledge_base_enabled: bool = False
+    bedrock_kb_id: str | None = None
     agentcore_memory_id: str | None = None
     agentcore_actor_id: str = "demo-speaker"
 
@@ -123,6 +135,8 @@ class Settings:
             s3_vectors_bucket=_env("S3_VECTORS_BUCKET"),
             s3_vectors_index_name=_env("S3_VECTORS_INDEX_NAME"),
             memory_enabled=_env_bool("MEMORY_ENABLED", False),
+            knowledge_base_enabled=_env_bool("KNOWLEDGE_BASE_ENABLED", False),
+            bedrock_kb_id=_env("BEDROCK_KB_ID"),
             agentcore_memory_id=_env("AGENTCORE_MEMORY_ID"),
             agentcore_actor_id=_env("AGENTCORE_ACTOR_ID", "demo-speaker"),
         )
@@ -142,6 +156,9 @@ class Stack:
     # activan explícitamente — ver `build_stack`. Con default, ningún
     # `Stack(...)` existente (tests incluidos) se rompe.
     memory: MemoryPort | None = None
+    # `None` salvo que modo aws + `knowledge_base_enabled` + id configurado
+    # coincidan: sin los tres, `retrieve` no la consulta y no hay tráfico.
+    knowledge_base: KnowledgeBasePort | None = None
 
 
 def build_stack(settings: Settings) -> Stack:
@@ -213,6 +230,14 @@ def _stack_aws(settings: Settings) -> Stack:
             memory_id=settings.agentcore_memory_id, region=settings.aws_region
         )
 
+    knowledge_base: KnowledgeBasePort | None = None
+    if settings.knowledge_base_enabled and settings.bedrock_kb_id:
+        from second_brain.adapters.aws.knowledge_base_store import KnowledgeBaseStore
+
+        knowledge_base = KnowledgeBaseStore(
+            knowledge_base_id=settings.bedrock_kb_id, region=settings.aws_region
+        )
+
     return Stack(
         embeddings=BedrockEmbeddings(
             model_id=settings.bedrock_embeddings_model_id,
@@ -230,6 +255,7 @@ def _stack_aws(settings: Settings) -> Stack:
             graph_name=settings.falkor_graph_name,
         ),
         rerank=BedrockRerank(region=settings.aws_region, model_id=settings.bedrock_rerank_model_id),
+        knowledge_base=knowledge_base,
         llm=BedrockLlm(
             model_id=settings.bedrock_llm_model_id,
             region=settings.aws_region,

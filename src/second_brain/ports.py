@@ -153,6 +153,24 @@ class VectorStorePort(Protocol):
 
 
 @runtime_checkable
+class KnowledgeBasePort(Protocol):
+    """Recuperador gestionado que recibe TEXTO, no un vector.
+
+    Es un puerto aparte de `VectorStorePort` justamente por eso: una Bedrock
+    Knowledge Base embebe la pregunta por su cuenta, así que no se le puede
+    pasar el vector que `EmbeddingsPort` ya calculó. Colapsar ambos puertos
+    obligaría a `VectorStorePort` a aceptar texto y vector a la vez, y todo
+    adapter existente tendría que ignorar la mitad de su firma.
+
+    Los `Hit` que devuelve entran a la fusión por rango como un ranking más
+    (ver `retrieval.retrieve`): su score vive en otra escala que el coseno
+    del vector store, y RRF es indiferente a eso porque solo mira el puesto.
+    """
+
+    def retrieve(self, question: str, top_k: int) -> list[Hit]: ...
+
+
+@runtime_checkable
 class GraphStorePort(Protocol):
     """Grafo de conocimiento con openCypher — hoy implementado por FalkorDB.
 
