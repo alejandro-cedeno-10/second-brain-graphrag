@@ -74,10 +74,16 @@ class KnowledgeBaseStore:
         (`servicios/core-billing.md`), no como una URL de bucket: el formato
         `[source:doc_id]` es un contrato del sintetizador, no un detalle de
         este adapter.
+
+        `chunk_id` es el id de chunk que la KB asigna, NO la URI: un documento
+        aporta varios chunks al ranking y `retrieval.fuse_rrf` acumula la
+        contribución por `chunk_id`. Con la URI como id, un doc con dos chunks
+        en el top-k recibía el doble de puntaje por el solo hecho de ser largo.
         """
         uri = result.get("location", {}).get("s3Location", {}).get("uri", "")
+        metadata_kb = result.get("metadata", {})
         return Hit(
-            chunk_id=uri,
+            chunk_id=metadata_kb.get("x-amz-bedrock-kb-chunk-id") or uri,
             text=result.get("content", {}).get("text", ""),
             score=float(result.get("score", 0.0)),
             metadata={"doc_id": _doc_id_from_uri(uri), "origen": "knowledge_base"},

@@ -120,10 +120,27 @@ def test_el_adapter_traduce_la_uri_de_s3_al_doc_id_que_se_cita() -> None:
         "content": {"text": "texto"},
         "score": 0.8,
         "location": {"s3Location": {"uri": "s3://mi-bucket/servicios/core-billing.md"}},
+        "metadata": {"x-amz-bedrock-kb-chunk-id": "chunk-1"},
     })
 
     assert hit.metadata["doc_id"] == "servicios/core-billing.md"
     assert hit.metadata["origen"] == "knowledge_base"
+    assert hit.chunk_id == "chunk-1"
+
+
+def test_dos_chunks_del_mismo_documento_no_comparten_chunk_id() -> None:
+    """Con la URI como id, `fuse_rrf` sumaba dos veces al mismo documento."""
+    store = KnowledgeBaseStore(knowledge_base_id="KB123")
+    uri = "s3://mi-bucket/arquitectura/decisiones.md"
+    a = store._to_hit({"content": {"text": "a"}, "score": 0.9,
+                       "location": {"s3Location": {"uri": uri}},
+                       "metadata": {"x-amz-bedrock-kb-chunk-id": "c-1"}})
+    b = store._to_hit({"content": {"text": "b"}, "score": 0.8,
+                       "location": {"s3Location": {"uri": uri}},
+                       "metadata": {"x-amz-bedrock-kb-chunk-id": "c-2"}})
+
+    assert a.chunk_id != b.chunk_id
+    assert a.metadata["doc_id"] == b.metadata["doc_id"]
 
 
 @pytest.mark.parametrize(
