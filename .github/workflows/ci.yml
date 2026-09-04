@@ -2,18 +2,8 @@ name: demo-ci
 
 on:
   push:
-    paths:
-      - "demo/**"
-      - ".github/workflows/ci.yml"
   pull_request:
-    paths:
-      - "demo/**"
-      - ".github/workflows/ci.yml"
   workflow_dispatch:
-
-defaults:
-  run:
-    working-directory: demo
 
 jobs:
   test:
@@ -21,7 +11,7 @@ jobs:
 
     # FalkorDB como service container: es lo que prueba que la demo corre en
     # cualquier lado, no solo en la máquina del speaker. El test marcado
-    # `docker` (tests/test_grafo.py::test_blast_radius_contra_falkordb_real)
+    # `docker` (tests/test_graph.py::test_blast_radius_against_real_falkordb)
     # conecta a `localhost:6379` a propósito — el runner de Actions publica
     # los puertos de los services en el host del job, así que ese `localhost`
     # es real acá sin ningún truco de red adicional.

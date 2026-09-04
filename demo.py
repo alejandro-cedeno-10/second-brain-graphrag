@@ -834,6 +834,25 @@ def _build_cli_stack(
     stack = build_stack(settings)
     if settings.mode == "aws":
         interno = stack.llm
+    elif settings.local_llm == "bedrock":
+        # Modo hibrido para demostrar la sintesis con un modelo REAL sin
+        # tocar AWS mas alla de la inferencia: el vector store, los
+        # embeddings y el rerank siguen siendo los locales (nada se escribe
+        # en S3 Vectors), y solo la redaccion la hace Bedrock. Es lo que
+        # permite ver en la UI texto generado de verdad en vez del guion.
+        #
+        # Ojo: con esto `demo.py check` deja de tener sentido — las 20
+        # verificaciones afirman contenido del guion (`ScriptedLlm`), no lo
+        # que un modelo real vaya a redactar.
+        from second_brain.adapters.aws.bedrock_llm import BedrockLlm
+
+        interno = BedrockLlm(
+            model_id=settings.bedrock_llm_model_id,
+            region=settings.aws_region,
+            guardrail_id=settings.bedrock_guardrail_id,
+            guardrail_version=settings.bedrock_guardrail_version,
+            guardrail_trace=settings.bedrock_guardrail_trace,
+        )
     elif agentic:
         interno = build_agentic_scripted_llm(
             stack, naive=naive, actor_id=actor_id, session_id=session_id
@@ -952,17 +971,30 @@ def ingest() -> None:
         progress.update(tarea, advance=1, description="Indexando vectores...")
         stats = index(documentos, stack)
         progress.update(tarea, advance=1, description="Construyendo grafo...")
-        grafo = build_graph(RUTA_CORPUS_DEFAULT, stack)
+        # Con `SECOND_BRAIN_GRAPH_BACKEND=toolkit` el grafo NO lo construye
+        # este comando: lo escribe `LexicalGraphIndex` del GraphRAG Toolkit
+        # via `scripts/toolkit_extract_build.py` (extract con LLM una vez,
+        # build offline en cada ensayo). `ToolkitGraphStore` rechaza los
+        # upserts a proposito, asi que llamar a `build_graph` aca romperia.
+        grafo = None
+        if settings.graph_backend != "toolkit":
+            grafo = build_graph(RUTA_CORPUS_DEFAULT, stack)
         progress.update(tarea, advance=1, description="Listo")
 
     console.print(
         f"[green]✔[/] {stats.documents} documentos → {stats.chunks} chunks "
         f"(dim={stats.embeddings_dim})"
     )
-    console.print(
-        f"[green]✔[/] grafo: {len(grafo.entities)} entidades, "
-        f"{len(grafo.relations)} relaciones"
-    )
+    if grafo is None:
+        console.print(
+            "[green]✔[/] grafo: lo construye el GraphRAG Toolkit "
+            "(scripts/toolkit_extract_build.py build), no la ingesta"
+        )
+    else:
+        console.print(
+            f"[green]✔[/] grafo: {len(grafo.entities)} entidades, "
+            f"{len(grafo.relations)} relaciones"
+        )
 
 
 def _format_path(path: Path) -> str:
