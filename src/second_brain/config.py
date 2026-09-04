@@ -70,6 +70,23 @@ class Settings:
     # `graph_name` con guión bajo (como usan algunos tests contra un
     # FalkorDB real) sigue funcionando por el fallback al cliente directo.
     falkor_graph_name: str = "secondbrain"
+    # `toolkit` lee el grafo que construyo `LexicalGraphIndex` del GraphRAG
+    # Toolkit (esquema `__Entity__`/`__RELATION__`, ver
+    # `scripts/toolkit_extract_build.py` y `adapters/toolkit_graph_store.py`);
+    # `propio` lee el grafo `Entidad`/`RELACION` del extractor por patrones.
+    # Los dos hablan a FalkorDB por el conector del toolkit — lo que cambia
+    # es QUIEN escribio el grafo, no como se conecta.
+    graph_backend: str = "propio"
+    # Base de FalkorDB donde vive el grafo del toolkit. Separada de
+    # `falkor_graph_name` a proposito: los dos grafos coexisten, asi la
+    # charla puede mostrarlos lado a lado sin reingestar.
+    toolkit_graph_name: str = "toolkitgrafo"
+    corpus_path: str = "corpus"
+    # `bedrock` reemplaza SOLO el `LlmPort` del modo local por `BedrockLlm`,
+    # dejando embeddings/vector store/rerank locales. Sirve para mostrar la
+    # sintesis con un modelo real sin escribir nada en AWS (la inferencia de
+    # Bedrock no crea recursos). Ver `demo._build_cli_stack`.
+    local_llm: str = "scripted"
 
     vector_store_path: str | None = None
 
@@ -121,6 +138,10 @@ class Settings:
             falkor_host=_env("FALKOR_HOST", "localhost"),
             falkor_port=_env_int("FALKOR_PORT", 6379),
             falkor_graph_name=_env("FALKOR_GRAPH_NAME", "secondbrain"),
+            graph_backend=_env("GRAPH_BACKEND", "propio"),
+            toolkit_graph_name=_env("TOOLKIT_GRAPH_NAME", "toolkitgrafo"),
+            corpus_path=_env("CORPUS_PATH", "corpus"),
+            local_llm=_env("LOCAL_LLM", "scripted"),
             vector_store_path=_env("VECTOR_STORE_PATH"),
             aws_region=_env("AWS_REGION", "us-east-1"),
             bedrock_embeddings_model_id=_env(
@@ -177,10 +198,64 @@ def build_stack(settings: Settings) -> Stack:
     raise ValueError(f"SECOND_BRAIN_MODE inválido: '{settings.mode}' (use 'local' o 'aws')")
 
 
+def _graph_store_for(settings: Settings):
+    """El `GraphStorePort` del stack, segun `SECOND_BRAIN_GRAPH_BACKEND`.
+
+    `propio` -> `FalkorGraphStore` sobre `Entidad`/`RELACION`, el grafo que
+    construye `graph/build.py` con el extractor por patrones.
+
+    `toolkit` -> `ToolkitGraphStore` sobre `__Entity__`/`__RELATION__`, el
+    grafo que construye `LexicalGraphIndex` del GraphRAG Toolkit. Se le pasa
+    el conjunto de entidades que el corpus respalda con un documento, porque
+    la extraccion por LLM produce entidades que no son citables (la empresa
+    entera, equipos, personas, cabeceras HTTP) y sin esa proyeccion la guarda
+    anti-hub corta la expansion de los servicios principales — ver el
+    docstring de `ToolkitGraphStore`.
+    """
+    if settings.graph_backend == "toolkit":
+        from second_brain.adapters.graphrag_toolkit import falkordb_graph_store
+        from second_brain.adapters.toolkit_graph_store import ToolkitGraphStore
+
+        store = falkordb_graph_store(
+            settings.falkor_host, settings.falkor_port, settings.toolkit_graph_name
+        )
+        if store is None:
+            raise RuntimeError(
+                "graph_backend='toolkit' necesita el GraphRAG Toolkit instalado y un "
+                f"nombre de grafo alfanumerico (recibi '{settings.toolkit_graph_name}'). "
+                "El grafo del toolkit lo escribe scripts/toolkit_extract_build.py."
+            )
+        return ToolkitGraphStore(
+            store, entidades_con_documento=_entidades_con_documento(settings.corpus_path)
+        )
+
+    from second_brain.adapters.local.falkor_graph_store import FalkorGraphStore
+
+    return FalkorGraphStore(
+        host=settings.falkor_host,
+        port=settings.falkor_port,
+        graph_name=settings.falkor_graph_name,
+    )
+
+
+def _entidades_con_documento(corpus_path: str) -> set[str]:
+    """Los stems de los `.md` del corpus: las entidades que se pueden citar.
+
+    Excluye `README.md` por el mismo motivo que `ingestion.load_corpus`
+    (`ingestion.py:57`): es el contrato de diseno del corpus, no contenido.
+    """
+    from pathlib import Path as _Ruta
+
+    return {
+        archivo.stem
+        for archivo in _Ruta(corpus_path).rglob("*.md")
+        if archivo.name != "README.md"
+    }
+
+
 def _stack_local(settings: Settings) -> Stack:
     from second_brain.adapters.local.fake_embeddings import FakeEmbeddings
     from second_brain.adapters.local.fake_rerank import FakeRerank
-    from second_brain.adapters.local.falkor_graph_store import FalkorGraphStore
     from second_brain.adapters.local.memory_vector_store import MemoryVectorStore
     from second_brain.adapters.local.scripted_llm import ScriptedLlm
 
@@ -193,11 +268,7 @@ def _stack_local(settings: Settings) -> Stack:
     return Stack(
         embeddings=FakeEmbeddings(dim=settings.embeddings_dim),
         vector_store=MemoryVectorStore(persistence_path=settings.vector_store_path),
-        graph_store=FalkorGraphStore(
-            host=settings.falkor_host,
-            port=settings.falkor_port,
-            graph_name=settings.falkor_graph_name,
-        ),
+        graph_store=_graph_store_for(settings),
         rerank=FakeRerank(),
         llm=ScriptedLlm(),
         memory=memory,
@@ -220,7 +291,6 @@ def _stack_aws(settings: Settings) -> Stack:
     from second_brain.adapters.aws.bedrock_llm import BedrockLlm
     from second_brain.adapters.aws.bedrock_rerank import BedrockRerank
     from second_brain.adapters.aws.s3_vectors_store import S3VectorsStore
-    from second_brain.adapters.local.falkor_graph_store import FalkorGraphStore
 
     memory: MemoryPort | None = None
     if settings.memory_enabled and settings.agentcore_memory_id:
@@ -249,11 +319,7 @@ def _stack_aws(settings: Settings) -> Stack:
             index_name=settings.s3_vectors_index_name or "",
             region=settings.aws_region,
         ),
-        graph_store=FalkorGraphStore(
-            host=settings.falkor_host,
-            port=settings.falkor_port,
-            graph_name=settings.falkor_graph_name,
-        ),
+        graph_store=_graph_store_for(settings),
         rerank=BedrockRerank(region=settings.aws_region, model_id=settings.bedrock_rerank_model_id),
         knowledge_base=knowledge_base,
         llm=BedrockLlm(

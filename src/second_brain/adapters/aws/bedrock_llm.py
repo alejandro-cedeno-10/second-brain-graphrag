@@ -71,14 +71,27 @@ class BedrockLlm:
             }
         return arguments
 
-    @staticmethod
-    def _to_converse_message(message: dict[str, Any]) -> dict[str, Any]:
+    def _to_converse_message(self, message: dict[str, Any]) -> dict[str, Any]:
         """Normaliza al contrato de la API Converse, que exige `content` como
         LISTA de bloques (`[{"text": ...}]`) y rechaza un string plano con
         `ParamValidationError`. El contrato interno de `LlmPort` acepta el
         string directo (así lo usan la síntesis y los tests con `ScriptedLlm`,
         que nunca validan la forma), por eso la adaptación vive acá y no en
         cada call site — encontrado recién al invocar Bedrock real.
+
+        Los bloques `guardContent` (contextual grounding) SOLO se emiten si
+        hay un guardrail configurado. Sin esa condición, Converse rechaza el
+        turno entero:
+
+            ValidationException: The guardrail can't assess the content in
+            the guardContent field. The guardrail configuration is missing.
+
+        Es decir: `guardContent` sin `guardrailConfig` no es "una pista que
+        Bedrock ignora", es un error duro. Y como `guardrail_id` es `None` por
+        default, cualquier corrida en modo `aws` sin
+        `SECOND_BRAIN_BEDROCK_GUARDRAIL_ID` fallaba en TODA síntesis que
+        pasara `grounding_source`+`query` — o sea, el camino principal.
+        Encontrado corriendo la UI contra Bedrock real sin guardrail.
         """
         content = message.get("content")
         if not isinstance(content, str):
@@ -86,7 +99,7 @@ class BedrockLlm:
         blocks: list[dict[str, Any]] = [{"text": content}]
         grounding_source = message.get("grounding_source")
         query = message.get("query")
-        if grounding_source and query:
+        if grounding_source and query and self._guardrail_id:
             blocks.append(
                 {
                     "guardContent": {

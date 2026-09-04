@@ -40,8 +40,18 @@ def load_chunks_from_corpus(raiz: RutaArchivo | str) -> list[Chunk]:
     dentro de un mismo documento (ver `corpus/README.md`), así que no hace
     falta la granularidad fina que sí necesitaría el chunking para el vector
     store (eso lo resuelve el pipeline de ingesta, no este módulo).
+
+    Excluye `README.md` por el mismo motivo que `ingestion.load_corpus`
+    (`ingestion.py:57`): es el contrato de diseño del corpus para humanos, no
+    contenido indexable. Sin esta exclusión el grafo terminaba con una arista
+    (`billing-2-0 -DEPENDE_DE-> auth-cache`) extraída de una TABLA de ese
+    README, con provenance `README` — un documento que el vector store no
+    contiene, así que la cita no se podía resolver. Peor: contradecía el
+    principio de `graph/extraction.py` (una arista que no viene del corpus
+    vuelve el grafo no auditable).
     """
-    return [_load_chunk(ruta) for ruta in sorted(RutaArchivo(raiz).rglob("*.md"))]
+    archivos = sorted(p for p in RutaArchivo(raiz).rglob("*.md") if p.name != "README.md")
+    return [_load_chunk(ruta) for ruta in archivos]
 
 
 def _load_chunk(path: RutaArchivo) -> Chunk:

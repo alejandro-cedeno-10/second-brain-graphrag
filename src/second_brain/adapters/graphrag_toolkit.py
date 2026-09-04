@@ -100,8 +100,7 @@ def attempt_toolkit_extraction(chunks: list[Chunk], graph_store_uri: str, llm: L
     adentro, con lo cual el llamador debe seguir con el camino determinista.
     """
     try:
-        from graphrag_toolkit.lexical_graph import LexicalGraphIndex
-        from llama_index.core import Settings as LlamaIndexSettings
+        from graphrag_toolkit.lexical_graph import GraphRAGConfig, LexicalGraphIndex
         from llama_index.core.schema import Document as LlamaDocument
 
         from second_brain.adapters.graphrag_toolkit_llm import LlmPortAsLlamaIndexLlm
@@ -110,14 +109,24 @@ def attempt_toolkit_extraction(chunks: list[Chunk], graph_store_uri: str, llm: L
         return False
 
     try:
-        LlamaIndexSettings.llm = LlmPortAsLlamaIndexLlm(llm_port=llm)
+        # `GraphRAGConfig.extraction_llm`, NO `llama_index.Settings.llm`: el
+        # toolkit no lee el `Settings` de LlamaIndex, tiene su propia config y
+        # su default construye un `BedrockConverse` (`config.py:1031`).
+        # Asignarlo al Settings dejaba el shim sin efecto y la extracción se
+        # iba a Bedrock igual — verificado contra el toolkit instalado.
+        GraphRAGConfig.extraction_llm = LlmPortAsLlamaIndexLlm(llm_port=llm)
         documents = [
             LlamaDocument(
                 text=chunk.text, doc_id=chunk.id, metadata={"document_id": chunk.document_id}
             )
             for chunk in chunks
         ]
-        index = LexicalGraphIndex(graph_store=graph_store_uri)
+        # `vector_store` es obligatorio en la práctica aunque la firma lo
+        # declare opcional: `__init__` se lo pasa a
+        # `VectorStoreFactory.for_vector_store()`, que hace `.startswith()`
+        # sobre el valor y rompe con `None`. `dummy://` lo resuelve sin
+        # levantar ningún servicio de vectores.
+        index = LexicalGraphIndex(graph_store=graph_store_uri, vector_store="dummy://")
         index.extract_and_build(documents)
         return True
     except Exception as exc:  # noqa: BLE001 - cualquier falla cae al camino determinista
