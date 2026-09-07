@@ -23,7 +23,7 @@ vieja). Corre antes de `ingestar-knowledge-base.py`.
 Uso (desde `demo/infra/`, con credenciales activas):
 
     python subir-corpus.py
-    python subir-corpus.py --region us-west-2 --dry-run
+    python subir-corpus.py --region us-east-1 --dry-run
 """
 
 from __future__ import annotations

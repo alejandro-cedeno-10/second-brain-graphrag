@@ -44,7 +44,9 @@ GROUNDING_THRESHOLD = 0.75
 RELEVANCE_THRESHOLD = 0.65
 
 # Modelos de Bedrock que el agente invoca (ver .env.example / config.py):
-# Cohere Embed Multilingual v3, Cohere Rerank 3.5, Amazon Nova Pro.
+# Amazon Nova 2 Multimodal Embeddings (default) y Cohere Embed Multilingual v3
+# (alternativa por env var), Cohere Rerank 3.5, Amazon Nova Micro (default de
+# síntesis) y Amazon Nova Pro (alternativa por env var).
 BEDROCK_MODEL_IDS = [
     "amazon.nova-2-multimodal-embeddings-v1:0",
     "cohere.embed-multilingual-v3",

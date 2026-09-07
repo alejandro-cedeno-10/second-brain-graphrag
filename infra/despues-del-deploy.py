@@ -13,7 +13,7 @@ Uso (desde `demo/infra/`, con credenciales AWS activas y los stacks ya
 desplegados):
 
     python despues-del-deploy.py
-    python despues-del-deploy.py --region us-west-2 --out ../.env
+    python despues-del-deploy.py --region us-east-1 --out ../.env
 
 Es idempotente: pisa `.env` con los valores actuales de CloudFormation. Si
 un stack no está desplegado, se aborta con un mensaje claro en vez de
@@ -90,7 +90,7 @@ def construir_env(region: str) -> str:
         "SECOND_BRAIN_MODE=aws",
         f"SECOND_BRAIN_AWS_REGION={region}",
         "",
-        "SECOND_BRAIN_BEDROCK_EMBEDDINGS_MODEL_ID=cohere.embed-multilingual-v3",
+        "SECOND_BRAIN_BEDROCK_EMBEDDINGS_MODEL_ID=amazon.nova-2-multimodal-embeddings-v1:0",
         "SECOND_BRAIN_BEDROCK_EMBEDDINGS_DIM=1024",
         "SECOND_BRAIN_BEDROCK_RERANK_MODEL_ID=cohere.rerank-v3-5:0",
         "SECOND_BRAIN_BEDROCK_LLM_MODEL_ID=amazon.nova-pro-v1:0",

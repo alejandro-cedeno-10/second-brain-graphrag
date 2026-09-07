@@ -51,7 +51,7 @@ app = cdk.App()
 
 env = cdk.Environment(
     account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
-    region=os.environ.get("CDK_DEFAULT_REGION", "us-west-2"),
+    region=os.environ.get("CDK_DEFAULT_REGION", "us-east-1"),
 )
 
 budget_alert_email = app.node.try_get_context("budget_alert_email") or os.environ.get(
