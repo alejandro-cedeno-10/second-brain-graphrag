@@ -17,7 +17,7 @@ Uso (desde `demo/infra/`, con credenciales activas y el Storage stack
 desplegado con `-c enable_knowledge_base=true`):
 
     python ingestar-knowledge-base.py
-    python ingestar-knowledge-base.py --region us-west-2 --timeout 900
+    python ingestar-knowledge-base.py --region us-east-1 --timeout 900
 """
 
 from __future__ import annotations

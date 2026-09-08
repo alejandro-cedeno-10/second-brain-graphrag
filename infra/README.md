@@ -64,12 +64,15 @@ cuenta.
 ## Prerequisitos
 
 - Cuenta de AWS con acceso a **Amazon Bedrock** habilitado para los modelos
-  Cohere Embed Multilingual v3, Cohere Rerank 3.5 y Amazon Nova Micro/Pro (algunos
+  Amazon Nova 2 Multimodal Embeddings (o Cohere Embed Multilingual v3, ver
+  `.env.example`), Cohere Rerank 3.5 y Amazon Nova Micro/Pro (algunos
   requieren "model access" manual una vez por cuenta/región en la consola de
   Bedrock).
-- Región recomendada: **us-west-2 (Oregon)** — es donde el plan de la charla
-  confirma disponibilidad de Rerank + S3 Vectors + AgentCore juntos. Otra
-  región con esos servicios sirve igual.
+- Región: **us-east-1 (N. Virginia)** — es donde está verificado el despliegue
+  de esta demo (Bedrock con Nova 2 ME + Cohere Rerank 3.5 + Nova, S3 Vectors
+  y AgentCore) y el default compartido por `config.py`, `.env.example`,
+  `adapters/aws/bedrock_rerank.py` e `infra/app.py`. Otra región con esos
+  servicios sirve igual, pasando `CDK_DEFAULT_REGION` y `--region`.
 - Python 3.11+ y Node.js (para el CLI de `cdk`).
 - Credenciales de AWS activas (`aws sts get-caller-identity` debe responder).
 
@@ -117,9 +120,13 @@ cdk deploy --all \
   pasarlas, el deploy no arrastra la KB ni ningún recurso de AgentCore.
 - **AgentCore Runtime necesita una imagen real en ECR antes de poder
   invocarse.** El deploy crea el repositorio ECR vacío (`AgentRuntimeEcrRepositoryUriOutput`);
-  el build/push de la imagen del agente Strands es un paso manual posterior,
-  fuera de este `cdk deploy` (no hay Dockerfile de esa imagen en este repo
-  todavía).
+  el build/push de la imagen es un paso manual posterior, fuera de este
+  `cdk deploy`. La imagen sale del stage `agentcore` del `Dockerfile` de la
+  raíz (`docker buildx build --platform linux/arm64 --target agentcore` —
+  AgentCore solo acepta ARM64): arranca `demo.py mcp-server --transport
+  streamable-http --host 0.0.0.0 --port 8000`, el contrato MCP del Runtime
+  (endpoint `/mcp`). Recién con la imagen pusheada, un segundo deploy con
+  `-c runtime_image_ready=true` crea el Runtime.
 - Sin `enable_graph_ec2`, **no hay ninguna VPC en este CDK** — el `cdk
   synth`/`cdk deploy` mínimo no dispara el lookup de AZs que sí necesitaba
   el viejo stack de Neptune. `cdk.context.json` puede quedar vacío.
@@ -190,7 +197,7 @@ En vez de copiar esos ARNs a mano en vivo, corré esto después del
 
 ```bash
 # desde demo/infra/, con las credenciales AWS que usaste para deployar:
-python despues-del-deploy.py --region us-west-2
+python despues-del-deploy.py --region us-east-1
 
 # o, desde demo/, con `make`:
 make aws-env

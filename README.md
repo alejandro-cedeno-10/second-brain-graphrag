@@ -53,12 +53,12 @@ up`/`ingest`/`query` por dentro, para quien prefiera los comandos sueltos):
 
 ```bash
 docker compose up -d --build                                          # levanta FalkorDB + arma el contenedor (auto-ingesta al arrancar)
-docker compose run --rm demo python demo.py check                      # corre las 5 preguntas y valida el comportamiento esperado
+docker compose run --rm demo python demo.py check                      # corre las 10 preguntas del guion en los dos caminos (20 verificaciones)
 docker compose run --rm demo python demo.py query --trace "¿Quién lidera el Proyecto Beta?"   # una pregunta con el pipeline paso a paso
 ```
 
 Si además tenés `make` (Linux/macOS, o Git Bash con `make` instalado), estos
-atajos corren la demo guiada completa por CLI (las 5 preguntas con
+atajos corren la demo guiada por CLI (las 5 preguntas de la charla con
 `--trace`, pausando entre cada una) — `make.ps1` sigue existiendo para
 PowerShell nativo en Windows, pero dejó de ser el camino recomendado:
 
@@ -87,7 +87,7 @@ sentido correcto de cada relación. Cuando el gate abstiene, la UI marca en
 rojo que **el LLM nunca fue invocado** — el momento clave de la charla.
 
 La CLI sigue siendo la fuente de verdad del guion: la UI lee las preguntas y
-sus respuestas esperadas de `demo._VERIFICACIONES` (las mismas 5 que corre
+sus respuestas esperadas de `demo._VERIFICATIONS` (las mismas 10 que corre
 `python demo.py check`), nunca las duplica a mano.
 
 ### Levantar la UI con Docker (recomendado para grabar)
@@ -123,12 +123,12 @@ Abrí `http://localhost:5173`. En Windows nativo: `.\make.ps1 web-dev-api` /
 `TOOL_CALL_START/ARGS/END` para cada herramienta del pipeline, `STATE_DELTA`
 para el resto de las etapas, `TEXT_MESSAGE_START/CONTENT/END` para la
 respuesta final, `RUN_FINISHED`/`RUN_ERROR` al cerrar) — el mapeo completo
-está documentado en el docstring del módulo. El pipeline (`agente.orquestador.responder`)
+está documentado en el docstring del módulo. El pipeline (`agent.orchestrator.answer`)
 sigue siendo síncrono y fijo: no se reescribió a async, solo se le agregó un
 hook opcional (`on_paso`, sin efecto si no se pasa) para observar cada
-`PasoTraza` a medida que se produce.
+`TraceStep` a medida que se produce.
 
-## Las 5 preguntas de la demo
+## Las 5 preguntas de la charla
 
 | # | Pregunta | Qué demuestra | Patrón de la charla |
 |---|---|---|---|
@@ -140,16 +140,20 @@ hook opcional (`on_paso`, sin efecto si no se pasa) para observar cada
 
 El contrato completo (qué documento sostiene cada respuesta, qué se verificó
 por `grep` para garantizarlo) vive en [`corpus/README.md`](corpus/README.md).
-`python demo.py check` corre las 5 y valida el comportamiento esperado de
-cada una — es el smoke test para correr antes de subir al escenario.
+`python demo.py check` corre estas 5 más las 5 de los casos "wow" (el
+gancho de Billing 2.0 y los 4 casos de uso, documentados en el mismo
+`corpus/README.md`) — 10 preguntas en los dos caminos, 20 verificaciones —
+y valida el comportamiento esperado de cada una: es el smoke test para
+correr antes de subir al escenario. `make demo` recorre solo estas 5 con
+`--trace`.
 
 ## Los 3 patrones con nombre de la charla, en el código
 
 | Patrón | Dónde vive | Qué pregunta lo demuestra |
 |---|---|---|
-| Retrieve-then-rerank para entidades | [`src/second_brain/retrieval.py`](src/second_brain/retrieval.py) — función `resolver_objetivos` | la ambigüedad detrás de P5 (`"reportes"` matchea dos documentos; el rerank arbitra) |
-| Subject-anchored synthesis (anclaje al sujeto) | [`src/second_brain/agente/sintesis.py`](src/second_brain/agente/sintesis.py) — `SYSTEM_SINTESIS` + `construir_mensaje_usuario` | P5 — la trampa del drift |
-| Defensa en profundidad con kill-switch por capa | [`src/second_brain/agente/gate.py`](src/second_brain/agente/gate.py) (capa de entrada, antes del LLM) + [`src/second_brain/agente/guards.py`](src/second_brain/agente/guards.py) (capas de salida, después) | P3 — el coverage gate ahorra el LLM entero; todas — `validar_citas`/`guard_urls` recortan lo no evidenciado |
+| Retrieve-then-rerank para entidades | [`src/second_brain/retrieval.py`](src/second_brain/retrieval.py) — función `resolve_targets` | la ambigüedad detrás de P5 (`"reportes"` matchea dos documentos; el rerank arbitra) |
+| Subject-anchored synthesis (anclaje al sujeto) | [`src/second_brain/agent/synthesis.py`](src/second_brain/agent/synthesis.py) — `SYSTEM_SYNTHESIS` + `build_user_message` | P5 — la trampa del drift |
+| Defensa en profundidad con kill-switch por capa | [`src/second_brain/agent/gate.py`](src/second_brain/agent/gate.py) (capa de entrada, antes del LLM) + [`src/second_brain/agent/guards.py`](src/second_brain/agent/guards.py) (capas de salida, después) | P3 — el coverage gate ahorra el LLM entero; todas — `validate_citations`/`guard_urls` recortan lo no evidenciado |
 
 Cada uno de los tres módulos de arriba nombra el patrón en la primera línea
 de su docstring — es la forma de que alguien navegando el repo desde la

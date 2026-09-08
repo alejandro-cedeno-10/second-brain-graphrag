@@ -70,7 +70,7 @@ from aws_cdk import aws_budgets as budgets
 from aws_cdk import aws_logs as logs
 from constructs import Construct
 
-MONTHLY_BUDGET_LIMIT_USD = 70.0  # ver la tabla de costos del plan: ~$45-70/mes en modo demo
+MONTHLY_BUDGET_LIMIT_USD = 70.0  # tabla de costos en infra/README.md: ~$35-55/mes en modo demo
 
 
 class ObservabilityStack(Stack):
