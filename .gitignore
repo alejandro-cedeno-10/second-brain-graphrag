@@ -15,3 +15,26 @@ web/ui/dist/
 cdk.out/
 slides_png/
 *.png.tmp
+
+# Credenciales y material sensible: no existen hoy en el repo, y esta lista
+# es lo que evita que se suban por accidente si algun dia aparecen.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+credentials
+.env.local
+.env.*.local
+
+# Estado de infraestructura y volcados de datos
+*.tfstate
+*.tfstate.*
+*.sql
+*.dump
+*.bak
+
+# Salidas de ejecucion
+*.log
+*.ipynb
